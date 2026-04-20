@@ -75,3 +75,10 @@ DerivedDataCache/*
 
 # Local Claude settings
 .claude/
+
+# Local Codex worktrees
+.worktrees/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
