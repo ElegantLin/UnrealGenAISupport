@@ -16,9 +16,25 @@ import tempfile # For creating a secure temporary file
 from io import BytesIO
 from pathlib import Path
 
+try:
+    from utils.mcp_response import err, ok
+except ImportError:
+    from Content.Python.utils.mcp_response import err, ok
+
 
 DEFAULT_UNREAL_HOST = "localhost"
 DEFAULT_UNREAL_PORT = 9877
+DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
+LONG_RUNNING_SOCKET_COMMANDS = {
+    "add_nodes_bulk",
+    "compile_blueprint",
+    "connect_nodes_bulk",
+    "execute_python",
+    "execute_unreal_command",
+    "request_editor_restart",
+    "start_fab_add_to_project",
+    "start_fab_search",
+}
 
 
 def get_unreal_host():
@@ -75,15 +91,168 @@ if pid_file:
 mcp = FastMCP("UnrealHandshake")
 
 
+def _tool_success(message, data=None, **extra):
+    return ok(message=message, data=data, **extra)
+
+
+def _tool_error(message, error_code="TOOL_ERROR", **extra):
+    return err(message=message, error_code=error_code, **extra)
+
+
+def _response_warnings(result: dict) -> list:
+    warnings = result.get("warnings")
+    if isinstance(warnings, list):
+        return [str(item) for item in warnings if str(item).strip()]
+    if isinstance(warnings, str) and warnings.strip():
+        return [warnings]
+    return []
+
+
+def _looks_like_structured_envelope(result: dict) -> bool:
+    return (
+        isinstance(result, dict)
+        and "success" in result
+        and "api_version" in result
+        and ("data" in result or "error" in result)
+    )
+
+
+def _coerce_unreal_response(response, *, invalid_error_code: str = "INVALID_UNREAL_RESPONSE") -> dict:
+    if isinstance(response, dict):
+        return response
+
+    if isinstance(response, str):
+        try:
+            parsed = json.loads(response)
+        except json.JSONDecodeError as exc:
+            return {
+                "success": False,
+                "error": f"Failed to parse Unreal response: {exc}",
+                "error_code": invalid_error_code,
+                "raw_response": response,
+            }
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        return {
+            "success": False,
+            "error": f"Unexpected Unreal response payload type: {type(parsed).__name__}",
+            "error_code": invalid_error_code,
+            "raw_response": response,
+        }
+
+    return {
+        "success": False,
+        "error": f"Unexpected Unreal response type: {type(response).__name__}",
+        "error_code": invalid_error_code,
+    }
+
+
+def _tool_response_from_unreal(
+    response,
+    *,
+    tool_name: str,
+    success_message: str,
+    error_code: str,
+    default_error: str,
+    extra_data=None,
+):
+    result = _coerce_unreal_response(response)
+    data = {
+        "tool": tool_name,
+        "response": result,
+    }
+    if extra_data:
+        data.update(extra_data(result))
+
+    warnings = _response_warnings(result)
+    if result.get("job_id") and result.get("status") in {"queued", "running"} and result.get("result_available") is False:
+        return _tool_success(
+            result.get("message", f"{tool_name} was accepted for background execution."),
+            data=data,
+            warnings=warnings,
+            job_id=result.get("job_id"),
+            status=result.get("status"),
+            pending=True,
+        )
+
+    if result.get("success"):
+        return _tool_success(
+            success_message,
+            data=data,
+            warnings=warnings,
+            job_id=result.get("job_id"),
+            status=result.get("status"),
+        )
+
+    return _tool_error(
+        result.get("error", default_error),
+        error_code=result.get("error_code", error_code),
+        data=data,
+        warnings=warnings,
+        job_id=result.get("job_id"),
+        status=result.get("status"),
+    )
+
+
+def _forward_structured_socket_response(
+    response,
+    *,
+    success_message: str,
+    error_code: str,
+    default_error: str,
+):
+    result = _coerce_unreal_response(response)
+    if _looks_like_structured_envelope(result):
+        return result
+
+    warnings = _response_warnings(result)
+    if result.get("success"):
+        return ok(success_message, data=result, warnings=warnings)
+    return err(
+        result.get("error", default_error),
+        error_code=result.get("error_code", error_code),
+        data=result,
+        warnings=warnings,
+    )
+
+
+def _prepare_socket_command(command, timeout_seconds: float):
+    if not isinstance(command, dict):
+        return command, max(float(timeout_seconds), 1.0)
+
+    prepared_command = dict(command)
+    resolved_timeout = max(float(timeout_seconds), 1.0)
+
+    command_timeout = prepared_command.get("timeout_seconds")
+    if isinstance(command_timeout, (int, float)) and command_timeout > 0:
+        resolved_timeout = max(resolved_timeout, float(command_timeout) + 5.0)
+
+    if (
+        prepared_command.get("type") in LONG_RUNNING_SOCKET_COMMANDS
+        and "socket_wait_timeout" not in prepared_command
+        and not prepared_command.get("async")
+    ):
+        prepared_command["socket_wait_timeout"] = max(5.0, min(resolved_timeout - 5.0, 25.0))
+
+    socket_wait_timeout = prepared_command.get("socket_wait_timeout")
+    if isinstance(socket_wait_timeout, (int, float)) and socket_wait_timeout > 0:
+        resolved_timeout = max(resolved_timeout, float(socket_wait_timeout) + 5.0)
+
+    return prepared_command, resolved_timeout
+
+
 # Function to send a message to Unreal Engine via socket
-def send_to_unreal(command, timeout_seconds: float = 5.0, suppress_errors: bool = False):
+def send_to_unreal(command, timeout_seconds: float = DEFAULT_SOCKET_TIMEOUT_SECONDS, suppress_errors: bool = False):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
-            s.settimeout(timeout_seconds)
+            prepared_command, socket_timeout = _prepare_socket_command(command, timeout_seconds)
+            s.settimeout(socket_timeout)
             s.connect((get_unreal_host(), get_unreal_port()))
 
             # Ensure proper JSON encoding
-            json_str = json.dumps(command)
+            json_str = json.dumps(prepared_command)
             s.sendall(json_str.encode('utf-8'))
 
             # Implement robust response handling
@@ -345,7 +514,7 @@ def handshake_test(message: str) -> str:
 
 
 @mcp.tool()
-def execute_python_script(script: str) -> str:
+def execute_python_script(script: str) -> dict:
     """
     Execute a Python script within Unreal Engine's Python interpreter.
     
@@ -353,7 +522,10 @@ def execute_python_script(script: str) -> str:
         script: A string containing the Python code to execute in Unreal Engine.
         
     Returns:
-        Message indicating success, failure, or a request for confirmation.
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the tool name, script,
+        command output, and raw Unreal response. Failure or confirmation payloads
+        include `success=False`, `error`, `error_code`, and any relevant metadata.
         
     Note:
         This tool sends the script to Unreal Engine, where it is executed via a temporary file using Unreal's internal
@@ -364,30 +536,45 @@ def execute_python_script(script: str) -> str:
     """
     try:
         if is_potentially_destructive(script):
-            return ("This script appears to involve potentially destructive actions (e.g., deleting or saving files) "
-                    "that were not explicitly requested. Please confirm if you want to proceed by saying 'Yes, execute it' "
-                    "or modify your request to explicitly allow such actions.")
+            return _tool_error(
+                "This script appears to involve potentially destructive actions (e.g., deleting or saving files) that were not explicitly requested. Please confirm if you want to proceed by saying 'Yes, execute it' or modify your request to explicitly allow such actions.",
+                error_code="CONFIRMATION_REQUIRED",
+                confirmation_required=True,
+                data={
+                    "tool": "execute_python_script",
+                    "script": script,
+                },
+            )
 
         command = {
             "type": "execute_python",
             "script": script
         }
         response = send_to_unreal(command)
-        if response.get("success"):
-            output = response.get("output", "No output returned")
-            return f"Script executed successfully. Output: {output}"
-        else:
-            error = response.get("error", "Unknown error")
-            output = response.get("output", "")
-            if output:
-                error += f"\n\nPartial output before error: {output}"
-            return f"Failed to execute script: {response.get('error', 'Unknown error')}"
+        return _tool_response_from_unreal(
+            response,
+            tool_name="execute_python_script",
+            success_message="Script executed successfully.",
+            error_code="EXECUTE_PYTHON_FAILED",
+            default_error="Failed to execute script.",
+            extra_data=lambda result: {
+                "script": script,
+                "output": result.get("output", ""),
+            },
+        )
     except Exception as e:
-        return f"Error sending script to Unreal: {str(e)}"
+        return _tool_error(
+            f"Error sending script to Unreal: {str(e)}",
+            error_code="EXECUTE_PYTHON_FAILED",
+            data={
+                "tool": "execute_python_script",
+                "script": script,
+            },
+        )
 
 
 @mcp.tool()
-def execute_unreal_command(command: str) -> str:
+def execute_unreal_command(command: str) -> dict:
     """
     Execute an Unreal Engine command-line (CMD) command.
     
@@ -395,7 +582,10 @@ def execute_unreal_command(command: str) -> str:
         command: A string containing the Unreal Engine command to execute (e.g., "obj list", "stat fps").
         
     Returns:
-        Message indicating success or failure, including any output or errors.
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the tool name, command,
+        command output, and raw Unreal response. Failure or confirmation payloads
+        include `success=False`, `error`, `error_code`, and any relevant metadata.
         
     Note:
         This tool executes commands directly in Unreal Engine's command system, similar to the editor's console.
@@ -407,28 +597,53 @@ def execute_unreal_command(command: str) -> str:
     try:
         # Check if the command is attempting to run a Python script
         if command.strip().lower().startswith("py "):
-            return (
-                "Error: Use `execute_python_script` to run Python scripts instead of `execute_unreal_command` with 'py' commands. "
-                "For example, use `execute_python_script(script='your_code_here')` for Python execution.")
+            return _tool_error(
+                "Use `execute_python_script` to run Python scripts instead of `execute_unreal_command` with 'py' commands. For example, use `execute_python_script(script='your_code_here')` for Python execution.",
+                error_code="INVALID_COMMAND",
+                data={
+                    "tool": "execute_unreal_command",
+                    "command": command,
+                },
+            )
 
         # Check for potentially destructive commands
         destructive_keywords = ["delete", "save", "quit", "exit", "restart"]
         if any(keyword in command.lower() for keyword in destructive_keywords):
-            return ("This command appears to involve potentially destructive actions (e.g., deleting or saving). "
-                    "Please confirm by saying 'Yes, execute it' or explicitly request such actions.")
+            return _tool_error(
+                "This command appears to involve potentially destructive actions (e.g., deleting or saving). Please confirm by saying 'Yes, execute it' or explicitly request such actions.",
+                error_code="CONFIRMATION_REQUIRED",
+                confirmation_required=True,
+                data={
+                    "tool": "execute_unreal_command",
+                    "command": command,
+                },
+            )
 
         command_dict = {
             "type": "execute_unreal_command",
             "command": command
         }
         response = send_to_unreal(command_dict)
-        if response.get("success"):
-            output = response.get("output", "Command executed with no detailed output returned")
-            return f"Command '{command}' executed successfully. Output: {output}"
-        else:
-            return f"Failed to execute command '{command}': {response.get('error', 'Unknown error')}"
+        return _tool_response_from_unreal(
+            response,
+            tool_name="execute_unreal_command",
+            success_message="Command executed successfully.",
+            error_code="EXECUTE_UNREAL_COMMAND_FAILED",
+            default_error="Failed to execute Unreal command.",
+            extra_data=lambda result: {
+                "command": command,
+                "output": result.get("output", ""),
+            },
+        )
     except Exception as e:
-        return f"Error sending command to Unreal: {str(e)}"
+        return _tool_error(
+            f"Error sending command to Unreal: {str(e)}",
+            error_code="EXECUTE_UNREAL_COMMAND_FAILED",
+            data={
+                "tool": "execute_unreal_command",
+                "command": command,
+            },
+        )
 
 
 #
@@ -1001,7 +1216,7 @@ def spawn_blueprint_actor(blueprint_path: str, location: list = [0, 0, 0],
 #         return f"Failed to add nodes: {response.get('error', 'Unknown error')}"
 
 @mcp.tool()
-def add_component_with_events(blueprint_path: str, component_name: str, component_class: str) -> str:
+def add_component_with_events(blueprint_path: str, component_name: str, component_class: str) -> dict:
     """
     Add a component to a Blueprint with overlap events if applicable.
 
@@ -1011,7 +1226,10 @@ def add_component_with_events(blueprint_path: str, component_name: str, componen
         component_class: Class of the component (e.g., "BoxComponent")
 
     Returns:
-        Message with success, error, and event GUIDs if created
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the tool name, component
+        details, parsed overlap event GUIDs, and the raw Unreal response. Failure
+        payloads include `success=False`, `error`, `error_code`, and diagnostic data.
     """
     command = {
         "type": "add_component_with_events",
@@ -1020,19 +1238,47 @@ def add_component_with_events(blueprint_path: str, component_name: str, componen
         "component_class": component_class
     }
     response = send_to_unreal(command)
-    try:
-        import json
-        result = json.loads(response)
-        if result.get("success"):
-            msg = result.get("message", f"Added component {component_name}")
-            if "events" in result:
-                events = json.loads(result["events"])
-                if events["begin_guid"] or events["end_guid"]:
-                    msg += f"\nOverlap Events - Begin GUID: {events['begin_guid']}, End GUID: {events['end_guid']}"
-            return msg
-        return f"Failed: {result.get('error', 'Unknown error')}"
-    except Exception as e:
-        return f"Error parsing response: {str(e)}\nRaw response: {response}"
+    result = _coerce_unreal_response(response)
+
+    events = result.get("events")
+    if isinstance(events, str):
+        try:
+            events = json.loads(events)
+        except json.JSONDecodeError as exc:
+            return _tool_error(
+                f"Failed to parse overlap events from Unreal: {exc}",
+                error_code="INVALID_EVENTS_RESPONSE",
+                data={
+                    "tool": "add_component_with_events",
+                    "response": result,
+                    "raw_events": result.get("events"),
+                },
+            )
+
+    if result.get("success"):
+        return _tool_success(
+            result.get("message", f"Added component {component_name}."),
+            data={
+                "tool": "add_component_with_events",
+                "blueprint_path": blueprint_path,
+                "component_name": component_name,
+                "component_class": component_class,
+                "events": events if isinstance(events, dict) else {},
+                "response": result,
+            },
+        )
+
+    return _tool_error(
+        result.get("error", "Failed to add component with events."),
+        error_code=result.get("error_code", "ADD_COMPONENT_WITH_EVENTS_FAILED"),
+        data={
+            "tool": "add_component_with_events",
+            "blueprint_path": blueprint_path,
+            "component_name": component_name,
+            "component_class": component_class,
+            "response": result,
+        },
+    )
 
 
 @mcp.tool()
@@ -1171,7 +1417,7 @@ def enable_plugin(plugin_name: str, target_allow_list: list = None) -> str:
 
 @mcp.tool()
 def restart_editor(force: bool = False, wait_for_reconnect: bool = True,
-                   timeout_seconds: float = 180.0, editor_path: str = "") -> str:
+                   timeout_seconds: float = 180.0, editor_path: str = "") -> dict:
     """
     Restart the current Unreal Editor session.
 
@@ -1182,23 +1428,45 @@ def restart_editor(force: bool = False, wait_for_reconnect: bool = True,
         editor_path: Optional explicit Unreal Editor executable path override.
 
     Returns:
-        Message indicating success or failure.
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the tool name and restart
+        response details. Failure payloads include `success=False`, `error`,
+        `error_code`, and restart metadata such as confirmation requirements,
+        dirty packages, and suggested retry information when present.
     """
     result = _restart_editor_impl(force, wait_for_reconnect, timeout_seconds, editor_path)
     if result.get("success"):
-        launcher_pid = result.get("launcher_pid")
-        message = result.get("message", "Editor restart scheduled.")
-        if launcher_pid:
-            message += f" Launcher PID: {launcher_pid}."
-        return message
+        return _tool_success(
+            result.get("message", "Editor restart scheduled."),
+            data={
+                "tool": "restart_editor",
+                "response": result,
+            },
+        )
 
-    return _format_restart_failure(result)
+    error_code = result.get("error_code", "RESTART_EDITOR_FAILED")
+    if result.get("confirmation_required"):
+        error_code = "RESTART_CONFIRMATION_REQUIRED"
+
+    return _tool_error(
+        _format_restart_failure(result),
+        error_code=error_code,
+        data={
+            "tool": "restart_editor",
+            "response": result,
+        },
+        confirmation_required=result.get("confirmation_required", False),
+        reason=result.get("reason"),
+        dirty_packages=result.get("dirty_packages", []),
+        dirty_package_count=result.get("dirty_package_count", 0),
+        suggested_retry=result.get("suggested_retry"),
+    )
 
 
 @mcp.tool()
 def enable_plugin_and_restart(plugin_name: str, force: bool = False, wait_for_reconnect: bool = True,
                               timeout_seconds: float = 180.0, editor_path: str = "",
-                              target_allow_list: list = None) -> str:
+                              target_allow_list: list = None) -> dict:
     """
     Enable a plugin in the current project and restart Unreal Editor if the descriptor changed.
 
@@ -1211,7 +1479,10 @@ def enable_plugin_and_restart(plugin_name: str, force: bool = False, wait_for_re
         target_allow_list: Optional list such as ["Editor"].
 
     Returns:
-        Message indicating success or failure.
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the tool name plus the
+        enable and restart responses. Failure payloads include `success=False`,
+        `error`, `error_code`, and restart confirmation metadata when present.
     """
     response = send_to_unreal({
         "type": "set_plugin_enabled",
@@ -1219,19 +1490,180 @@ def enable_plugin_and_restart(plugin_name: str, force: bool = False, wait_for_re
         "enabled": True,
         "target_allow_list": target_allow_list,
     })
+    result = _coerce_unreal_response(response)
 
-    if not response.get("success"):
-        return f"Failed to enable plugin '{plugin_name}': {response.get('error', 'Unknown error')}"
+    if not result.get("success"):
+        return _tool_error(
+            result.get("error", f"Failed to enable plugin '{plugin_name}'."),
+            error_code=result.get("error_code", "ENABLE_PLUGIN_FAILED"),
+            data={
+                "tool": "enable_plugin_and_restart",
+                "plugin_name": plugin_name,
+                "response": result,
+            },
+        )
 
-    enable_message = response.get("message", f"Enabled plugin '{plugin_name}'.")
-    if not response.get("restart_required"):
-        return enable_message
+    enable_message = result.get("message", f"Enabled plugin '{plugin_name}'.")
+    if not result.get("restart_required"):
+        return _tool_success(
+            enable_message,
+            data={
+                "tool": "enable_plugin_and_restart",
+                "plugin_name": plugin_name,
+                "response": result,
+            },
+        )
 
     restart_result = _restart_editor_impl(force, wait_for_reconnect, timeout_seconds, editor_path)
     if restart_result.get("success"):
-        return f"{enable_message} {restart_result.get('message', 'Editor restarted successfully.')}"
+        return _tool_success(
+            f"{enable_message} {restart_result.get('message', 'Editor restarted successfully.')}",
+            data={
+                "tool": "enable_plugin_and_restart",
+                "plugin_name": plugin_name,
+                "enable_response": result,
+                "restart_response": restart_result,
+            },
+        )
 
-    return f"{enable_message} {_format_restart_failure(restart_result)}"
+    error_code = restart_result.get("error_code", "ENABLE_PLUGIN_AND_RESTART_FAILED")
+    if restart_result.get("confirmation_required"):
+        error_code = "RESTART_CONFIRMATION_REQUIRED"
+
+    return _tool_error(
+        f"{enable_message} {_format_restart_failure(restart_result)}",
+        error_code=error_code,
+        data={
+            "tool": "enable_plugin_and_restart",
+            "plugin_name": plugin_name,
+            "enable_response": result,
+            "restart_response": restart_result,
+        },
+        confirmation_required=restart_result.get("confirmation_required", False),
+        reason=restart_result.get("reason"),
+        dirty_packages=restart_result.get("dirty_packages", []),
+        dirty_package_count=restart_result.get("dirty_package_count", 0),
+        suggested_retry=restart_result.get("suggested_retry"),
+    )
+
+
+@mcp.tool()
+def get_capabilities() -> dict:
+    response = _coerce_unreal_response(send_to_unreal({"type": "get_capabilities"}))
+    if response.get("success"):
+        return ok("Capabilities loaded.", data=response, warnings=_response_warnings(response))
+    return err(
+        response.get("error", "Failed to load capabilities."),
+        error_code=response.get("error_code", "CAPABILITIES_FAILED"),
+        data=response,
+        warnings=_response_warnings(response),
+    )
+
+
+@mcp.tool()
+def preflight_project(
+    required_plugins: list = None,
+    required_editor_scripting_dependencies: list = None,
+) -> dict:
+    """
+    Run project preflight checks before attempting higher-risk Unreal mutations.
+
+    Args:
+        required_plugins: Optional project plugins that must be enabled for the intended workflow.
+        required_editor_scripting_dependencies: Optional editor scripting plugins to verify explicitly.
+
+    Returns:
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the preflight summary.
+        Failure payloads include `success=False`, `error`, `error_code`, and
+        any normalized Unreal diagnostics. If Unreal already returns an envelope,
+        this tool forwards it without double-wrapping.
+    """
+    command = {"type": "preflight_project"}
+    if required_plugins is not None:
+        command["required_plugins"] = required_plugins
+    if required_editor_scripting_dependencies is not None:
+        command["required_editor_scripting_dependencies"] = required_editor_scripting_dependencies
+
+    response = _coerce_unreal_response(send_to_unreal(command))
+    if _looks_like_structured_envelope(response):
+        return response
+    return _forward_structured_socket_response(
+        response,
+        success_message="Preflight complete.",
+        error_code="PREFLIGHT_FAILED",
+        default_error="Failed to run project preflight.",
+    )
+
+
+@mcp.tool()
+def get_job_status(job_id: str) -> dict:
+    """
+    Retrieve the current state of an Unreal MCP background job.
+
+    Args:
+        job_id: The job identifier returned by a pending tool response.
+
+    Returns:
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the socket server's
+        normalized job status payload. Failure payloads include `success=False`,
+        `error`, `error_code`, and any normalized diagnostics.
+    """
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "get_job_status", "job_id": job_id}),
+        success_message="Job status loaded.",
+        error_code="JOB_STATUS_FAILED",
+        default_error="Failed to load job status.",
+    )
+
+
+@mcp.tool()
+def cancel_job(job_id: str) -> dict:
+    """
+    Attempt to cancel an Unreal MCP background job before it finishes.
+
+    Args:
+        job_id: The job identifier returned by a pending tool response.
+
+    Returns:
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the cancellation result.
+        Failure payloads include `success=False`, `error`, `error_code`, and
+        any normalized diagnostics.
+    """
+    response = _coerce_unreal_response(send_to_unreal({"type": "cancel_job", "job_id": job_id}))
+    if response.get("status") == "cancelled":
+        return ok(
+            response.get("message", "Job cancelled."),
+            data=response,
+            warnings=_response_warnings(response),
+        )
+    return _forward_structured_socket_response(
+        response,
+        success_message="Job cancelled.",
+        error_code="CANCEL_JOB_FAILED",
+        default_error="Failed to cancel job.",
+    )
+
+
+@mcp.tool()
+def list_active_jobs() -> dict:
+    """
+    List Unreal MCP jobs that are still queued or running.
+
+    Returns:
+        Structured response envelope dict. Success payloads include `success=True`,
+        a human-readable `message`, and `data` containing the active job list.
+        Failure payloads include `success=False`, `error`, `error_code`, and
+        any normalized diagnostics.
+    """
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "list_active_jobs"}),
+        success_message="Active jobs loaded.",
+        error_code="LIST_ACTIVE_JOBS_FAILED",
+        default_error="Failed to list active jobs.",
+    )
 
 
 # Scene Control

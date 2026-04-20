@@ -6,6 +6,10 @@ This plugin lets an LLM (like you, Claude) boss around Unreal Engine with MCP. A
 
 ## Key Notes
 
+- **Fresh Session Rule**: Call `get_capabilities` or `preflight_project` before doing real work in a new editor session. Use that output to detect unsafe commands, missing plugins, editor path issues, and `x64`/`arm64` mismatches first.
+- **Structured Results**: Prefer the structured envelope fields over ad-hoc string parsing. Read `success`, `message`, `data`, `error`, `error_code`, `warnings`, `job_id`, and `api_version` before deciding what to do next.
+- **Long-Running Work**: If a tool returns `pending=True` with a `job_id`, do not assume the command finished. Poll `get_job_status`, use `list_active_jobs` for visibility, and only call `cancel_job` when cancellation is still safe.
+- **Unsafe Escape Hatch**: Treat `execute_python_script` as an unsafe fallback, especially when `get_capabilities` marks `execute_python` as unsafe. Prefer dedicated Blueprint, component, plugin, and project tools when they exist.
 - **Pin Connections**: For inbuilt Events like BeginPlay Use "then" for execution pin, not "OutputDelegate" (delegates). Verify pin names in JSON.
 - **Node Types**: Use `add_node_to_blueprint` with "EventBeginPlay", "Multiply_FloatFloat", or basics like "Branch", "Sequence". Unrecognized types return suggestions.
 - **Node Spacing**: Set `node_position` in JSON (e.g., [0, 0], [400, 0])—maintain 400x, 300y gaps to prevent overlap.

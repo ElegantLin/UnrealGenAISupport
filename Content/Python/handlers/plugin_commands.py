@@ -150,6 +150,213 @@ def _get_dirty_package_names() -> List[str]:
     return dirty_package_names
 
 
+def _normalize_architecture_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+
+    normalized_key = text.casefold().replace("-", "").replace("_", "")
+    if normalized_key in ("amd64", "win64", "x64", "x8664"):
+        return "x64"
+    if normalized_key in ("arm64", "aarch64"):
+        return "arm64"
+    return text
+
+
+def _guess_architecture_from_text(value: Any) -> str:
+    text = str(value or "").casefold()
+    if not text:
+        return "unknown"
+
+    if "arm64" in text or "aarch64" in text:
+        return "arm64"
+    if "x86_64" in text or "amd64" in text or "win64" in text or "x64" in text:
+        return "x64"
+    return "unknown"
+
+
+def _resolve_editor_binary_architecture(editor_path: str) -> str:
+    for candidate in (editor_path, platform.machine()):
+        architecture = _guess_architecture_from_text(candidate)
+        if architecture != "unknown":
+            return architecture
+    return "unknown"
+
+
+def _resolve_project_target_architecture(descriptor: Dict[str, Any]) -> str:
+    candidate_values: List[str] = []
+
+    for key in (
+        "TargetArchitecture",
+        "Architecture",
+        "ProjectTargetArchitecture",
+        "TargetArchitectureOverride",
+    ):
+        value = descriptor.get(key)
+        if isinstance(value, str) and value.strip():
+            candidate_values.append(value)
+
+    for key in ("TargetPlatforms", "PlatformAllowList", "SupportedTargetPlatforms"):
+        values = descriptor.get(key)
+        if isinstance(values, (list, tuple)):
+            candidate_values.extend(str(item) for item in values if str(item).strip())
+
+    modules = descriptor.get("Modules")
+    if isinstance(modules, list):
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            for key in ("TargetArchitecture", "Architecture", "PlatformAllowList"):
+                value = module.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidate_values.append(value)
+                elif isinstance(value, (list, tuple)):
+                    candidate_values.extend(str(item) for item in value if str(item).strip())
+
+    for candidate in candidate_values:
+        architecture = _guess_architecture_from_text(candidate)
+        if architecture != "unknown":
+            return architecture
+
+    return "unknown"
+
+
+def _collect_binary_candidates(project_dir: str) -> List[str]:
+    if not project_dir:
+        return []
+
+    patterns = [
+        os.path.join(project_dir, "Binaries", "**", "*"),
+        os.path.join(project_dir, "Plugins", "**", "Binaries", "**", "*"),
+    ]
+    extensions = {".dll", ".dylib", ".so", ".bundle"}
+    candidates: List[str] = []
+    seen = set()
+
+    for pattern in patterns:
+        for candidate in glob.glob(pattern, recursive=True):
+            if not os.path.isfile(candidate):
+                continue
+            if os.path.splitext(candidate)[1].lower() not in extensions:
+                continue
+
+            normalized = _normalize_path(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    return candidates
+
+
+def _resolve_module_architectures(project_dir: str, editor_binary_architecture: str) -> List[str]:
+    architectures: List[str] = []
+    seen = set()
+    binary_candidates = _collect_binary_candidates(project_dir)
+
+    for candidate in binary_candidates:
+        architecture = _guess_architecture_from_text(candidate)
+        if architecture == "unknown":
+            continue
+        if architecture in seen:
+            continue
+        seen.add(architecture)
+        architectures.append(architecture)
+
+    if architectures:
+        return architectures
+
+    if binary_candidates and editor_binary_architecture != "unknown":
+        return [editor_binary_architecture]
+
+    return []
+
+
+def _get_enabled_plugin_names(descriptor: Dict[str, Any]) -> List[str]:
+    enabled_plugin_names: List[str] = []
+    seen = set()
+
+    for entry in descriptor.get("Plugins", []):
+        if not isinstance(entry, dict):
+            continue
+
+        plugin_name = str(entry.get("Name", "")).strip()
+        if not plugin_name or not bool(entry.get("Enabled", True)):
+            continue
+        if plugin_name.casefold() in seen:
+            continue
+
+        seen.add(plugin_name.casefold())
+        enabled_plugin_names.append(plugin_name)
+
+    enabled_plugin_names.sort()
+    return enabled_plugin_names
+
+
+def _resolve_input_system(enabled_plugins: List[str]) -> str:
+    enabled_lookup = {plugin.casefold() for plugin in enabled_plugins}
+    if "enhancedinput" in enabled_lookup:
+        return "EnhancedInput"
+    if "commoninput" in enabled_lookup:
+        return "CommonInput"
+    return "unknown"
+
+
+def _extract_asset_path(asset: Any) -> str:
+    if asset is None:
+        return ""
+
+    for getter_name in ("get_path_name", "get_name"):
+        getter = getattr(asset, getter_name, None)
+        if callable(getter):
+            try:
+                value = str(getter()).strip()
+                if value:
+                    return value
+            except Exception:
+                continue
+
+    return str(asset).strip()
+
+
+def _get_open_asset_paths() -> List[str]:
+    open_asset_paths: List[str] = []
+    seen = set()
+
+    get_editor_subsystem = getattr(unreal, "get_editor_subsystem", None)
+    asset_editor_subsystem_class = getattr(unreal, "AssetEditorSubsystem", None)
+    if not callable(get_editor_subsystem) or asset_editor_subsystem_class is None:
+        return open_asset_paths
+
+    try:
+        asset_editor_subsystem = get_editor_subsystem(asset_editor_subsystem_class)
+    except Exception:
+        return open_asset_paths
+
+    for getter_name in ("get_all_open_assets", "get_open_assets"):
+        getter = getattr(asset_editor_subsystem, getter_name, None)
+        if not callable(getter):
+            continue
+
+        try:
+            assets = getter()
+        except Exception as exc:
+            log.log_warning(f"Failed to inspect open assets via {getter_name}: {exc}")
+            continue
+
+        for asset in assets or []:
+            asset_path = _extract_asset_path(asset)
+            if not asset_path or asset_path in seen:
+                continue
+            seen.add(asset_path)
+            open_asset_paths.append(asset_path)
+
+        if open_asset_paths:
+            break
+
+    return open_asset_paths
+
+
 def _load_project_descriptor() -> Dict[str, Any]:
     project_file_path = _resolve_project_file_path()
     if not project_file_path:
@@ -261,6 +468,21 @@ def handle_get_editor_context(command: Dict[str, Any]) -> Dict[str, Any]:
         engine_dir = _resolve_engine_dir()
         editor_path = _resolve_editor_path(engine_dir)
         dirty_packages = _get_dirty_package_names()
+        dirty_assets = list(dirty_packages)
+        open_asset_paths = _get_open_asset_paths()
+
+        descriptor: Dict[str, Any] = {"Plugins": []}
+        try:
+            if project_file_path:
+                descriptor = _load_project_descriptor()
+        except Exception as exc:
+            log.log_warning(f"Failed to inspect project descriptor for editor context: {exc}")
+
+        enabled_plugins = _get_enabled_plugin_names(descriptor)
+        editor_binary_architecture = _resolve_editor_binary_architecture(editor_path)
+        project_target_architecture = _resolve_project_target_architecture(descriptor)
+        module_architectures = _resolve_module_architectures(project_dir, editor_binary_architecture)
+        input_system = _resolve_input_system(enabled_plugins)
 
         response = {
             "success": bool(project_file_path),
@@ -273,6 +495,13 @@ def handle_get_editor_context(command: Dict[str, Any]) -> Dict[str, Any]:
             "platform": platform.system(),
             "dirty_packages": dirty_packages,
             "dirty_package_count": len(dirty_packages),
+            "editor_binary_architecture": editor_binary_architecture,
+            "project_target_architecture": project_target_architecture,
+            "module_architectures": module_architectures,
+            "input_system": input_system,
+            "enabled_plugins": enabled_plugins,
+            "dirty_assets": dirty_assets,
+            "open_asset_paths": open_asset_paths,
         }
 
         if not project_file_path:

@@ -234,6 +234,15 @@ For test builds you can call the `GenSecureKey::SetGenAIApiKeyRuntime` either in
 >
 > Please backup your project before using the MCP feature and use version control to track changes.
 
+##### MCP Foundation Contract
+
+- Structured MCP tools now return a stable envelope with `success`, `message`, `data`, `error`, `error_code`, `warnings`, `job_id`, and `api_version` when relevant.
+- Call `get_capabilities` or `preflight_project` first in a fresh session so the client can inspect engine support, unsafe commands, editor paths, plugin state, and architecture mismatches before mutating assets.
+- Long-running commands may return a pending job response instead of blocking indefinitely. When that happens, poll `get_job_status`, inspect `list_active_jobs`, and use `cancel_job` when the job is still queued.
+- `get_capabilities` reports `unsafe_commands`, `supported_asset_types`, and `supported_graph_types` so the client can separate safe editor automation from higher-risk escape hatches.
+- Treat `execute_python_script` as the unsafe fallback path. Prefer dedicated Blueprint, component, plugin, scene, and preflight tools whenever they exist, and only use raw Python execution when those safer tools cannot express the operation.
+- `preflight_project` explicitly reports architecture and dependency issues, including `x64` vs `arm64` mismatch remediation hints.
+
 
 ##### 1. Install any one of the below clients:
 * Claude Desktop App from [here](https://claude.anthropic.com/).
