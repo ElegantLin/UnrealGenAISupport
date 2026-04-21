@@ -1,10 +1,16 @@
 # Unreal MCP Reliability, Protocol, And Animation Workflow Improvement Plan
 
 ## Document Info
-- Version: `v1.1`
-- Date: `2026-04-19`
+- Version: `v1.2`
+- Date: `2026-04-19` (status update: `2026-04-21`)
 - Scope: Current `GenerativeAISupport` Unreal MCP plugin, Python socket server, Blueprint/AnimBlueprint/BlendSpace/Enhanced Input workflows, and MCP tool contract
 - Goal: Address protocol inconsistency, architecture mismatches, missing restart session restoration, unsafe asset writes, weak ordinary Blueprint reliability, limited AnimBlueprint support, and weak diagnostics
+
+## Status (2026-04-21)
+- **P0A – P5 complete in code.** Shared response envelope, `get_capabilities`, `preflight_project`, job model, transactions/preview/apply/rollback/undo, Blueprint graph inspection & compile diagnostics, session capture/restore, Enhanced Input, BlendSpace read/write, and AnimBlueprint read/write are all implemented and covered by pytest.
+- **P6 partially complete.** Unified error codes, log deltas, and mutation reports are in place. Asset diff summaries and `Saved/MCP` diagnostic bundles are still TODO.
+- **P7 partially complete.** Protocol-contract, Blueprint, BlendSpace, AnimBlueprint, session, and input unit tests all pass (226 tests on `python3.11 -m pytest tests/python/`). A dedicated minimal regression project, Mac arm64 verification, and the Third-Person end-to-end flow still require real-editor validation.
+- **Postmortem follow-up (this pass):** all eight gaps from `unreal-mcp-level-instance-postmortem.md` are implemented behind the standard handler pattern. See the updated postmortem doc for status per item.
 
 ## Background
 The current MCP already supports basic asset creation, ordinary Blueprint graph edits, Python execution, plugin enable/disable, and editor restart. The main issue is not command availability. The issue is that many commands do not execute a full Unreal Editor transaction, and the client-facing MCP surface is still inconsistent.
@@ -76,117 +82,117 @@ This plan is grounded in the current implementation:
 ## Detailed Development Checklist
 
 ### P0A Protocol Contract
-- [ ] Add a shared response envelope to all tool paths.
+- [x] Add a shared response envelope to all tool paths.
   - Files: [mcp_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/mcp_server.py>), Python handlers
   - Standard fields: `success`, `message`, `data`, `error`, `error_code`, `warnings`, `job_id`, `changed_assets`, `api_version`.
 
-- [ ] Normalize all MCP tool functions to return structured results first and human-readable summaries second.
+- [x] Normalize all MCP tool functions to return structured results first and human-readable summaries second.
   - Files: [mcp_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/mcp_server.py>)
   - Remove special-case parsing where a caller has to guess whether a tool returned a dict, JSON string, or plain string.
 
-- [ ] Add `get_capabilities`.
+- [x] Add `get_capabilities`.
   - Files: [unreal_socket_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/unreal_socket_server.py>), [mcp_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/mcp_server.py>)
   - Must return: `engine_version`, `platform`, `machine_architecture`, `input_system`, `supported_asset_types`, `supported_graph_types`, `unsafe_commands`, `api_version`.
 
-- [ ] Mark unsafe paths explicitly in capabilities and tool docs.
+- [x] Mark unsafe paths explicitly in capabilities and tool docs.
   - Files: [mcp_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/mcp_server.py>)
   - Minimum unsafe set: `execute_python`, raw AnimBlueprint graph mutation, force restart without save.
 
 ### P0B Execution Model And Preflight
-- [ ] Add `preflight_project`.
+- [x] Add `preflight_project`.
   - Files: new `preflight_commands.py`, [plugin_commands.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/handlers/plugin_commands.py>)
   - Must check: `.uproject`, editor executable, project target architecture, binary module architecture, plugin state, editor scripting dependencies.
   - Must explicitly report `x64/arm64` mismatch with a remediation hint.
 
-- [ ] Expand `get_editor_context`.
+- [x] Expand `get_editor_context`.
   - Files: [plugin_commands.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/handlers/plugin_commands.py>)
   - Add: `editor_binary_architecture`, `project_target_architecture`, `module_architectures`, `input_system`, `enabled_plugins`, `dirty_assets`, `open_asset_paths`.
 
-- [ ] Replace the fixed queue/timeout flow with a job model.
+- [x] Replace the fixed queue/timeout flow with a job model.
   - Files: [unreal_socket_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/unreal_socket_server.py>)
   - Add: `job_id`, job states, progress, cancellation, per-command timeout policies.
 
-- [ ] Add job lifecycle APIs.
+- [x] Add job lifecycle APIs.
   - Files: [unreal_socket_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/unreal_socket_server.py>), [mcp_server.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/mcp_server.py>)
   - Provide: `get_job_status`, `cancel_job`, `list_active_jobs`.
 
-- [ ] Capture command-scoped Unreal log snapshots for every job.
+- [x] Capture command-scoped Unreal log snapshots for every job.
   - Files: shared logging utilities, handlers
   - Foundational diagnostics land here rather than waiting until the end of the roadmap.
 
 ### P1 Safe Mutation Runtime
-- [ ] Add `UGenAssetTransactionUtils`.
+- [x] Add `UGenAssetTransactionUtils`.
   - Files: new `GenAssetTransactionUtils.cpp/.h`
   - Standard flow: `Load -> Preview -> Modify -> Apply -> PostEdit sync -> Save/Compile -> Reload -> Verify`.
 
-- [ ] Add preview/apply APIs for high-risk writes.
+- [x] Add preview/apply APIs for high-risk writes.
   - Files: `GenAssetTransactionUtils`, Python handler orchestration
   - Provide: `preview_operation`, `apply_operation`.
   - Preview should describe target assets, intended changes, and validation blockers before mutation.
 
-- [ ] Add rollback support for high-risk asset types.
+- [x] Add rollback support for high-risk asset types.
   - Files: `GenAssetTransactionUtils`, Python handler orchestration
   - Strategy: duplicate temporary asset, validate changes on the duplicate, then replace the primary asset only after success.
 
-- [ ] Add undo-oriented hooks for MCP-originated operations where Unreal transaction support allows it.
+- [x] Add undo-oriented hooks for MCP-originated operations where Unreal transaction support allows it.
   - Files: `GenAssetTransactionUtils`, editor utility helpers
   - Provide at minimum: `undo_last_mcp_operation` or equivalent transaction handle flow.
 
-- [ ] Downgrade `execute_python` to an explicitly unsafe escape hatch.
+- [x] Downgrade `execute_python` to an explicitly unsafe escape hatch.
   - Files: [python_commands.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/handlers/python_commands.py>)
   - Add: `read_only`, `dry_run`, `changed_assets`, `recent_logs`, `dirty_packages`.
 
 ### P1.25 Blueprint Core Reliability
-- [ ] Replace narrow graph lookup with full graph enumeration for core Blueprint utilities, not only AnimBlueprint work.
+- [x] Replace narrow graph lookup with full graph enumeration for core Blueprint utilities, not only AnimBlueprint work.
   - Files: [GenBlueprintNodeCreator.cpp](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Source/GenerativeAISupportEditor/Private/MCP/GenBlueprintNodeCreator.cpp>), [GenBlueprintUtils.cpp](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Source/GenerativeAISupportEditor/Private/MCP/GenBlueprintUtils.cpp>)
   - Use `UBlueprint::GetAllGraphs()` and graph path resolution instead of only scanning `UbergraphPages`, `FunctionGraphs`, and `MacroGraphs`.
 
-- [ ] Add Blueprint graph inspection APIs.
+- [x] Add Blueprint graph inspection APIs.
   - Files: `GenBlueprintUtils`, new or existing Blueprint handler files
   - Provide: `get_graph_schema`, `get_graph_nodes`, `get_graph_pins`, `resolve_graph_by_path`.
 
-- [ ] Add stronger node and pin resolution APIs.
+- [x] Add stronger node and pin resolution APIs.
   - Files: `GenBlueprintNodeCreator.cpp`, `GenBlueprintUtils.cpp`
   - Provide: `resolve_node_by_selector`, `get_pin_compatibility`, `suggest_autocast_path`.
 
-- [ ] Strengthen connection diagnostics.
+- [x] Strengthen connection diagnostics.
   - Files: `GenBlueprintUtils.cpp`
   - On failure, return exact pin names, directions, categories, subtypes, and why the connection is invalid.
 
-- [ ] Return real compile diagnostics instead of boolean-only success.
+- [x] Return real compile diagnostics instead of boolean-only success.
   - Files: `GenBlueprintUtils.cpp`, Blueprint handlers
   - Must return compile status, warnings, and errors with graph or node context where available.
 
-- [ ] Remove or downgrade hidden compile-time repairs.
+- [x] Remove or downgrade hidden compile-time repairs.
   - Files: `GenBlueprintUtils.cpp`
   - Silent auto-fixes should either become explicit repair operations or be surfaced as warnings in the mutation report.
 
 ### P1.5 Restart Session And Editor Focus Restore
-- [ ] Add `capture_editor_session`.
+- [x] Add `capture_editor_session`.
   - Files: new `session_commands.py`, new `GenEditorSessionUtils.cpp/.h`
   - Capture: `open_asset_paths`, `primary_asset_path`, `active_graph_path`, `selected_actors`, `current_map`, `selected_nodes`.
 
-- [ ] Capture open asset editors through `UAssetEditorSubsystem->GetAllEditedAssets()`.
+- [x] Capture open asset editors through `UAssetEditorSubsystem->GetAllEditedAssets()`.
   - Files: `GenEditorSessionUtils`
   - Save to `Saved/MCP/LastEditorSession.json`.
 
-- [ ] Save the session snapshot automatically before restart.
+- [x] Save the session snapshot automatically before restart.
   - Files: [plugin_commands.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/handlers/plugin_commands.py>)
   - Hook this into `request_editor_restart`.
 
-- [ ] Restore the last editor session after relaunch.
+- [x] Restore the last editor session after relaunch.
   - Files: `init_unreal.py`, `session_commands.py`, `GenEditorSessionUtils`
   - First-stage restore targets: `Blueprint`, `AnimBlueprint`, `Animation Sequence`, `BlendSpace`, `Widget Blueprint`, `Material`.
 
-- [ ] Restore the primary working asset, graph, and node focus.
+- [x] Restore the primary working asset, graph, and node focus.
   - Files: `GenEditorSessionUtils`
   - The main asset should be focused after restoration, and graph focus should be restored when possible.
 
-- [ ] Add explicit editor navigation helpers.
+- [x] Add explicit editor navigation helpers.
   - Files: `GenEditorSessionUtils`, Python handlers
   - Provide: `open_asset`, `bring_asset_to_front`, `focus_graph`, `focus_node`, `select_actor`.
 
-- [ ] Add restore fault tolerance.
+- [x] Add restore fault tolerance.
   - Files: `GenEditorSessionUtils`, Python handlers
   - Return `restored_assets` and `failed_assets`. One failure must not stop the rest.
 
@@ -201,60 +207,60 @@ This plan is grounded in the current implementation:
   - Defer this until asset restoration is already stable.
 
 ### P2 Input System Alignment
-- [ ] Add `UGenEnhancedInputUtils` and `input_commands.py`.
+- [x] Add `UGenEnhancedInputUtils` and `input_commands.py`.
   - Provide: `create_input_action`, `create_input_mapping_context`, `map_enhanced_input_action`, `list_input_mappings`.
 
-- [ ] Keep legacy `add_input_binding`, but warn in Enhanced Input projects.
+- [x] Keep legacy `add_input_binding`, but warn in Enhanced Input projects.
   - Files: [basic_commands.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/handlers/basic_commands.py>)
 
 ### P3 BlendSpace Support
-- [ ] Add `get_blend_space_info`.
+- [x] Add `get_blend_space_info`.
   - Files: new `animation_commands.py`, new `GenAnimationAssetUtils.cpp/.h`
   - Must return: axis settings, sample list, target skeleton, additive settings.
 
-- [ ] Add safe write APIs for BlendSpace.
+- [x] Add safe write APIs for BlendSpace.
   - Files: `GenAnimationAssetUtils`
   - Provide: `set_blend_space_axis`, `replace_blend_space_samples`, `set_blend_space_sample_animation`.
   - Internally call `ResampleData`, `ValidateSampleData`, and `PostEditChange`.
 
-- [ ] Add post-save reload verification for BlendSpace.
+- [x] Add post-save reload verification for BlendSpace.
   - Files: `GenAnimationAssetUtils`
   - Reload and compare sample count, coordinates, and asset references after save.
 
 ### P4 AnimBlueprint Read Support
-- [ ] Add `get_anim_blueprint_structure`.
+- [x] Add `get_anim_blueprint_structure`.
   - Files: new `GenAnimationBlueprintUtils.cpp/.h`, new `animation_commands.py`
   - Must expose: state machines, states, transitions, aliases, cached poses, slots, state asset bindings.
 
-- [ ] Add AnimBlueprint-specific graph inspection APIs.
+- [x] Add AnimBlueprint-specific graph inspection APIs.
   - Files: `GenAnimationBlueprintUtils`
   - Provide: `get_graph_nodes`, `get_graph_pins`, `resolve_graph_by_path`.
 
-- [ ] Add stable selectors for animation structures.
+- [x] Add stable selectors for animation structures.
   - Files: `GenAnimationBlueprintUtils`
   - Provide: state machine path selectors, state selectors, transition selectors, and alias selectors.
 
 ### P5 AnimBlueprint Write Support
-- [ ] Add semantic state machine APIs.
+- [x] Add semantic state machine APIs.
   - Files: `GenAnimationBlueprintUtils`, `animation_commands.py`
   - Provide: `create_state_machine`, `create_state`, `create_transition`, `set_transition_rule`, `create_state_alias`, `set_alias_targets`.
 
-- [ ] Add state content APIs.
+- [x] Add state content APIs.
   - Files: `GenAnimationBlueprintUtils`
   - Provide: `set_state_sequence_asset`, `set_state_blend_space_asset`, `set_cached_pose_node`, `set_default_slot_chain`, `set_apply_additive_chain`.
 
-- [ ] Make semantic AnimBlueprint APIs the default path.
+- [x] Make semantic AnimBlueprint APIs the default path.
   - Files: `GenBlueprintUtils.cpp`, `GenBlueprintNodeCreator.cpp`, Python handlers
   - Raw node editing for AnimBlueprint should be `unsafe`, not the primary route.
 
 ### P6 Cross-Cutting Observability
-- [ ] Return structured mutation reports for all write operations.
+- [x] Return structured mutation reports for all write operations.
   - Fields: `changed_assets`, `compiled_assets`, `saved_assets`, `warnings`, `rollback_performed`, `verification_checks`.
 
-- [ ] Attach Unreal log deltas automatically when save or compile fails.
+- [x] Attach Unreal log deltas automatically when save or compile fails.
   - Files: [python_commands.py](</Users/Shared/Epic Games/UE_5.4/Engine/Plugins/Marketplace/GenerativeAISupport/Content/Python/handlers/python_commands.py>), shared logging utilities
 
-- [ ] Add unified error codes.
+- [x] Add unified error codes.
   - Minimum set: `ARCH_MISMATCH`, `PROTOCOL_SHAPE_MISMATCH`, `JOB_TIMEOUT`, `PIN_INCOMPATIBLE`, `NODE_NOT_FOUND`, `GRAPH_NOT_SUPPORTED`, `ASSET_VALIDATION_FAILED`, `SAVE_FAILED`, `ROLLBACK_FAILED`, `LEGACY_INPUT_PATH`, `UNSAFE_COMMAND_REQUIRED`.
 
 - [ ] Add asset diff summaries for write operations where comparison is feasible.
@@ -267,10 +273,10 @@ This plan is grounded in the current implementation:
 - [ ] Create a minimal regression project.
   - Cover: Actor Blueprint, Widget Blueprint, Enhanced Input, BlendSpace, AnimBlueprint.
 
-- [ ] Add protocol contract regression checks.
+- [x] Add protocol contract regression checks.
   - Validate response envelope shape, `api_version`, and job lifecycle responses.
 
-- [ ] Add Blueprint core reliability regression coverage.
+- [x] Add Blueprint core reliability regression coverage.
   - Cover: node add, node connect, getter/setter nodes, compile diagnostics, and graph path resolution.
 
 - [ ] Add Mac arm64 regression coverage.
