@@ -203,17 +203,47 @@ def handle_get_files_in_folder(command: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 def handle_add_input_binding(command: Dict[str, Any]) -> Dict[str, Any]:
+    """Legacy action-mapping path.  Enhanced Input is preferred since UE5.1."""
     try:
         action_name = command.get("action_name")
         key = command.get("key")
-        # Correctly access the InputSettings singleton
+
+        # Best-effort warning: if the project already ships Enhanced Input the
+        # caller should prefer ``create_input_action`` / ``map_enhanced_input_action``.
+        warnings: List[Dict[str, str]] = []
+        try:
+            from utils.input_mapping import legacy_binding_warning
+        except ImportError:  # pragma: no cover - pytest layout
+            legacy_binding_warning = None
+        if legacy_binding_warning is not None:
+            try:
+                project_uses_ei = False
+                try:
+                    import importlib
+                    plugin_mgr = getattr(unreal, "PluginManager", None)
+                    if plugin_mgr and hasattr(plugin_mgr, "get"):
+                        plugins = plugin_mgr.get().get_enabled_plugins_with_content()
+                        project_uses_ei = any("EnhancedInput" in p.get_name() for p in plugins)
+                except Exception:
+                    project_uses_ei = False
+                warning = legacy_binding_warning(project_uses_ei)
+                if warning is not None:
+                    warnings.append(warning)
+            except Exception:  # pragma: no cover - safety net
+                pass
+
         input_settings = unreal.InputSettings.get_input_settings()
-        # Create the input action mapping
-        action_mapping = unreal.InputActionKeyMapping(action_name=action_name, key=unreal.InputCoreTypes.get_key(key))
-        # Add the mapping to the input settings
+        action_mapping = unreal.InputActionKeyMapping(
+            action_name=action_name, key=unreal.InputCoreTypes.get_key(key)
+        )
         input_settings.add_action_mapping(action_mapping)
-        # Save the changes to the config file
         input_settings.save_config()
-        return {"success": True, "message": f"Added input binding {action_name} -> {key}"}
+        response: Dict[str, Any] = {
+            "success": True,
+            "message": f"Added input binding {action_name} -> {key}",
+        }
+        if warnings:
+            response["warnings"] = warnings
+        return response
     except Exception as e:
         return {"success": False, "error": str(e)}
