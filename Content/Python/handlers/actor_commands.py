@@ -204,3 +204,4 @@ def handle_create_game_mode(command: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads(result)
     except Exception as e:
         return {"success": False, "error": str(e)}
+
