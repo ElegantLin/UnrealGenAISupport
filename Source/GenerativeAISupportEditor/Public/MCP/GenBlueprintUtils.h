@@ -131,9 +131,48 @@ public:
 	static FString AddComponentWithEvents(const FString& BlueprintPath, const FString& ComponentName,
 	                               const FString& ComponentClassName);
 
+	/** Return a JSON array describing every graph inside the Blueprint.
+	 *  Shape: {"graphs":[{"path":"...","name":"...","kind":"..."}]} */
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Blueprint Inspection")
+	static FString GetAllGraphsJson(const FString& BlueprintPath);
+
+	/** Resolve a graph by its hierarchical path (``EventGraph/MyFunction``).
+	 *  Returns a JSON object: {"found":bool,"graph_path":"...","kind":"..."}. */
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Blueprint Inspection")
+	static FString ResolveGraphByPath(const FString& BlueprintPath, const FString& GraphPath);
+
+	/** Return a JSON array of nodes inside the named graph. */
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Blueprint Inspection")
+	static FString GetGraphNodesJson(const FString& BlueprintPath, const FString& GraphPath);
+
+	/** Return a JSON array of pins on the node whose GUID is ``NodeGuid``. */
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Blueprint Inspection")
+	static FString GetGraphPinsJson(const FString& BlueprintPath, const FString& GraphPath, const FString& NodeGuid);
+
+	/** Resolve a node by a user-provided selector (GUID / name / event alias). */
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Blueprint Inspection")
+	static FString ResolveNodeBySelector(const FString& BlueprintPath, const FString& GraphPath,
+	                                     const FString& Identifier, const FString& Kind);
+
+	/** Report structured compile diagnostics. */
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Blueprint Inspection")
+	static FString CompileBlueprintWithDiagnostics(const FString& BlueprintPath);
+
 private:
 	// Helper functions for internal use
 	static UBlueprint* LoadBlueprintAsset(const FString& BlueprintPath);
 	static UClass* FindClassByName(const FString& ClassName);
 	static UFunction* FindFunctionByName(UClass* Class, const FString& FunctionName);
+
+	/** Return every graph inside a Blueprint by walking ``GetAllGraphs``. */
+	static void CollectAllGraphs(UBlueprint* Blueprint, TArray<UEdGraph*>& OutGraphs);
+
+	/** Find a graph by GUID across the full ``GetAllGraphs`` enumeration. */
+	static UEdGraph* FindGraphByGuidAllGraphs(UBlueprint* Blueprint, const FGuid& GraphGuid);
+
+	/** Find a graph by hierarchical path segments (case-insensitive names). */
+	static UEdGraph* FindGraphByPath(UBlueprint* Blueprint, const FString& NormalizedGraphPath);
+
+	/** Classify a graph into a stable display string (Ubergraph, Function, ...). */
+	static FString ClassifyGraphKind(UBlueprint* Blueprint, UEdGraph* Graph);
 };

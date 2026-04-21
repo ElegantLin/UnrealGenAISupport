@@ -177,19 +177,10 @@ FString UGenBlueprintNodeCreator::AddNodesBulk(const FString& BlueprintPath, con
 	}
 
 	UEdGraph* FunctionGraph = nullptr;
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
-		if (Graph->GraphGuid == GraphGuid)
-		{
-			FunctionGraph = Graph;
-			break;
-		}
-	if (!FunctionGraph)
-		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-			if (Graph->GraphGuid == GraphGuid)
-			{
-				FunctionGraph = Graph;
-				break;
-			}
+	// Fall back to the unified lookup so animation, macro, and delegate
+	// graphs all participate in bulk node insertion just like ubergraph and
+	// function graphs do.
+	FunctionGraph = FindGraphByGuid(Blueprint, GraphGuid);
 	if (!FunctionGraph)
 	{
 		UE_LOG(LogTemp, Error, TEXT("Could not find function graph with GUID: %s"), *FunctionGuid);
@@ -396,33 +387,18 @@ UEdGraph* UGenBlueprintNodeCreator::FindGraphByGuid(UBlueprint* Blueprint, const
 {
 	if (!Blueprint) return nullptr;
 
-	// Look in UbergraphPages
-	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	// Use the full enumeration from UBlueprint::GetAllGraphs so the lookup
+	// covers Animation, Macro, Delegate, Composite, and other graph kinds in
+	// addition to the historical Ubergraph/Function lists.
+	TArray<UEdGraph*> AllGraphs;
+	Blueprint->GetAllGraphs(AllGraphs);
+	for (UEdGraph* Graph : AllGraphs)
 	{
 		if (Graph && Graph->GraphGuid == GraphGuid)
 		{
 			return Graph;
 		}
 	}
-
-	// Look in FunctionGraphs
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (Graph && Graph->GraphGuid == GraphGuid)
-		{
-			return Graph;
-		}
-	}
-
-	// Look in MacroGraphs (if needed)
-	for (UEdGraph* Graph : Blueprint->MacroGraphs)
-	{
-		if (Graph && Graph->GraphGuid == GraphGuid)
-		{
-			return Graph;
-		}
-	}
-
 	return nullptr;
 }
 
@@ -846,10 +822,10 @@ UEdGraph* UGenBlueprintNodeCreator::GetGraphFromFunctionId(UBlueprint* Blueprint
 	FGuid GraphGuid;
 	if (FGuid::Parse(FunctionGuid, GraphGuid))
 	{
-		for (UEdGraph* Graph : Blueprint->UbergraphPages)
-			if (Graph->GraphGuid == GraphGuid) return Graph;
-		for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-			if (Graph->GraphGuid == GraphGuid) return Graph;
+		if (UEdGraph* Found = FindGraphByGuid(Blueprint, GraphGuid))
+		{
+			return Found;
+		}
 	}
 	UE_LOG(LogTemp, Error, TEXT("Could not resolve function ID %s to a graph"), *FunctionGuid);
 	return nullptr;

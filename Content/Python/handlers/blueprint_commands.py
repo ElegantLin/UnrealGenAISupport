@@ -5,6 +5,11 @@ from typing import Dict, Any, List, Tuple, Union, Optional
 from utils import unreal_conversions as uc
 from utils import logging as log
 
+try:
+    from utils.mcp_response import err, ok
+except ImportError:  # pragma: no cover - fallback for pytest layout
+    from Content.Python.utils.mcp_response import err, ok
+
 
 def handle_create_blueprint(command: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -240,7 +245,7 @@ def handle_connect_nodes(command: Dict[str, Any]) -> Dict[str, Any]:
 
         if not all([blueprint_path, function_id, source_node_id, source_pin, target_node_id, target_pin]):
             log.log_error("Missing required parameters for connect_nodes")
-            return {"success": False, "error": "Missing required parameters"}
+            return err(error_code="MISSING_PARAMETERS", message="Missing required parameters for connect_nodes")
 
         log.log_command("connect_nodes",
                         f"Blueprint: {blueprint_path}, {source_node_id}.{source_pin} -> {target_node_id}.{target_pin}")
@@ -253,50 +258,66 @@ def handle_connect_nodes(command: Dict[str, Any]) -> Dict[str, Any]:
 
         if result.get("success"):
             log.log_result("connect_nodes", True, f"Connected nodes in {blueprint_path}")
-            return {"success": True}
-        else:
-            log.log_error(f"Failed to connect nodes: {result.get('error')}")
-            return result  # Pass through the detailed response with available pins
+            return ok("", data={"connection": result})
+
+        log.log_error(f"Failed to connect nodes: {result.get('error')}")
+        error_code = result.get("error_code", "CONNECT_NODES_FAILED")
+        message = result.get("error") or "Failed to connect nodes"
+        return err(message, error_code=error_code, data={"detail": result})
 
     except Exception as e:
         log.log_error(f"Error connecting nodes: {str(e)}", include_traceback=True)
-        return {"success": False, "error": str(e)}
+        return err(error_code="CONNECT_NODES_EXCEPTION", message=str(e))
 
 
 def handle_compile_blueprint(command: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Handle a command to compile a Blueprint
-    
-    Args:
-        command: The command dictionary containing:
-            - blueprint_path: Path to the Blueprint asset
-            
-    Returns:
-        Response dictionary with success/failure status
+    """Compile a Blueprint and return a structured envelope.
+
+    Prefers ``CompileBlueprintWithDiagnostics`` when the extended C++ API is
+    available so callers see warnings/errors instead of a silent pass/fail.
     """
     try:
         blueprint_path = command.get("blueprint_path")
 
         if not blueprint_path:
             log.log_error("Missing required parameters for compile_blueprint")
-            return {"success": False, "error": "Missing required parameters"}
+            return err(error_code="MISSING_PARAMETERS", message="Missing required parameters for compile_blueprint")
 
         log.log_command("compile_blueprint", f"Blueprint: {blueprint_path}")
 
-        # Call the C++ implementation
         gen_bp_utils = unreal.GenBlueprintUtils
-        success = gen_bp_utils.compile_blueprint(blueprint_path)
 
+        diagnostics_fn = getattr(gen_bp_utils, "compile_blueprint_with_diagnostics", None)
+        if diagnostics_fn is not None:
+            try:
+                raw = diagnostics_fn(blueprint_path)
+                result = json.loads(raw)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.log_error(f"Diagnostic compile failed, falling back: {exc}")
+                result = None
+            if result is not None:
+                data = {
+                    "warnings": result.get("warnings", []),
+                    "errors": result.get("errors", []),
+                    "num_errors": result.get("num_errors", 0),
+                    "num_warnings": result.get("num_warnings", 0),
+                }
+                if result.get("success"):
+                    log.log_result("compile_blueprint", True, f"Compiled blueprint: {blueprint_path}")
+                    return ok("", data=data, warnings=data["warnings"])
+                message = result.get("error") or "Blueprint compilation reported errors"
+                return err(error_code="COMPILE_FAILED", message=message, data=data)
+
+        success = gen_bp_utils.compile_blueprint(blueprint_path)
         if success:
             log.log_result("compile_blueprint", True, f"Compiled blueprint: {blueprint_path}")
-            return {"success": True}
-        else:
-            log.log_error(f"Failed to compile blueprint: {blueprint_path}")
-            return {"success": False, "error": f"Failed to compile blueprint: {blueprint_path}"}
+            return ok("", data={"warnings": [], "errors": []})
+        log.log_error(f"Failed to compile blueprint: {blueprint_path}")
+        return err(error_code="COMPILE_FAILED", message=f"Failed to compile blueprint: {blueprint_path}")
 
     except Exception as e:
         log.log_error(f"Error compiling blueprint: {str(e)}", include_traceback=True)
-        return {"success": False, "error": str(e)}
+        return err(error_code="COMPILE_EXCEPTION", message=str(e))
 
 
 def handle_spawn_blueprint(command: Dict[str, Any]) -> Dict[str, Any]:

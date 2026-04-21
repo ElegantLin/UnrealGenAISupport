@@ -5,10 +5,14 @@
 
 #include "BlueprintEditor.h"
 #include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_Event.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Blueprint.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraphSchema_K2.h"
 #include "Factories/BlueprintFactory.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "UObject/SavePackage.h"
 #include "Blueprint/BlueprintSupport.h"
@@ -509,16 +513,18 @@ FString UGenBlueprintUtils::ConnectNodes(const FString& BlueprintPath, const FSt
 	}
 	else
 	{
-		// Original GUID-based lookup for function graphs
+		// Use the full graph enumeration so function/macro/animation graphs
+		// all participate in connection lookups.
 		FGuid GraphGuid;
 		if (!FGuid::Parse(FunctionGuid, GraphGuid))
 			return TEXT("{\"success\": false, \"error\": \"Invalid function GUID\"}");
 
-		for (UEdGraph* Graph : Blueprint->UbergraphPages)
-			if (Graph->GraphGuid == GraphGuid) { FunctionGraph = Graph; break; }
+		FunctionGraph = FindGraphByGuidAllGraphs(Blueprint, GraphGuid);
 		if (!FunctionGraph)
-			for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-				if (Graph->GraphGuid == GraphGuid) { FunctionGraph = Graph; break; }
+		{
+			// Fall back to treating the provided token as a graph path.
+			FunctionGraph = FindGraphByPath(Blueprint, FunctionGuid);
+		}
 	}
 
 	if (!FunctionGraph)
@@ -635,49 +641,48 @@ bool UGenBlueprintUtils::CompileBlueprint(const FString& BlueprintPath)
 {
 	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
 	if (!Blueprint) return false;
-    
-	// Validate pin connections before compiling
-	TArray<FString> InvalidConnectionMessages;
+
+	// Legacy behavior: historically this method silently fixed duplicate
+	// exec connections before compiling.  Prefer to surface the issue through
+	// CompileBlueprintWithDiagnostics; here we only log the repair so callers
+	// can still compile without pre-existing diagnostics plumbing.
+	TArray<UEdGraph*> AllGraphs;
+	CollectAllGraphs(Blueprint, AllGraphs);
 	bool HasInvalidConnections = false;
-    
-	// Check all graphs
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+	for (UEdGraph* Graph : AllGraphs)
 	{
+		if (!Graph) continue;
 		for (UEdGraphNode* Node : Graph->Nodes)
 		{
 			for (UEdGraphPin* Pin : Node->Pins)
 			{
-				// Check for multiple connections to exec output pins (a common issue)
 				if (Pin->Direction == EGPD_Output && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
 				{
 					if (Pin->LinkedTo.Num() > 1)
 					{
 						HasInvalidConnections = true;
-						// Optionally fix by keeping only the first connection
 						while (Pin->LinkedTo.Num() > 1)
 						{
 							Pin->LinkedTo.RemoveAt(1);
 						}
-						FString Message = FString::Printf(TEXT("Fixed invalid multiple connections from pin %s on node %s"), 
-							*Pin->PinName.ToString(), *Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-						InvalidConnectionMessages.Add(Message);
+						UE_LOG(LogTemp, Warning, TEXT("[MCP] Removed duplicate exec connection from %s.%s; call compile_blueprint_with_diagnostics to surface this as a warning instead of a silent repair."),
+							*Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString(),
+							*Pin->PinName.ToString());
 					}
 				}
 			}
 		}
 	}
-    
-	// If issues were found and fixed, mark blueprint modified
+
 	if (HasInvalidConnections)
 	{
 		Blueprint->Modify();
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	}
-    
-	// Now compile
+
 	UE_LOG(LogTemp, Log, TEXT("Compiled blueprint: %s"), *BlueprintPath);
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-    
+
 	return true;
 }
 
@@ -974,14 +979,7 @@ FString UGenBlueprintUtils::GetNodeGUID(const FString& BlueprintPath, const FStr
         if (FunctionGuid.IsEmpty()) return TEXT("{\"success\": false, \"error\": \"Function GUID required for FunctionGraph\"}");
         FGuid GraphGuid;
         if (!FGuid::Parse(FunctionGuid, GraphGuid)) return TEXT("{\"success\": false, \"error\": \"Invalid function GUID\"}");
-        for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-        {
-            if (Graph->GraphGuid == GraphGuid)
-            {
-                TargetGraph = Graph;
-                break;
-            }
-        }
+        TargetGraph = FindGraphByGuidAllGraphs(Blueprint, GraphGuid);
     }
 
     if (!TargetGraph) return TEXT("{\"success\": false, \"error\": \"Could not find specified graph\"}");
@@ -1184,4 +1182,414 @@ FString UGenBlueprintUtils::AddComponentWithEvents(const FString& BlueprintPath,
     // Return success with GUIDs
     return FString::Printf(TEXT("{\"success\": true, \"message\": \"Added collision component %s with overlap events\", \"begin_overlap_guid\": \"%s\", \"end_overlap_guid\": \"%s\"}"),
                            *ComponentName, *BeginOverlapEvent->NodeGuid.ToString(), *EndOverlapEvent->NodeGuid.ToString());
+}
+// -----------------------------------------------------------------------------
+// Graph enumeration helpers
+// -----------------------------------------------------------------------------
+
+void UGenBlueprintUtils::CollectAllGraphs(UBlueprint* Blueprint, TArray<UEdGraph*>& OutGraphs)
+{
+OutGraphs.Reset();
+if (!Blueprint) return;
+Blueprint->GetAllGraphs(OutGraphs);
+}
+
+UEdGraph* UGenBlueprintUtils::FindGraphByGuidAllGraphs(UBlueprint* Blueprint, const FGuid& GraphGuid)
+{
+if (!Blueprint || !GraphGuid.IsValid()) return nullptr;
+TArray<UEdGraph*> Graphs;
+Blueprint->GetAllGraphs(Graphs);
+for (UEdGraph* Graph : Graphs)
+{
+if (Graph && Graph->GraphGuid == GraphGuid)
+{
+return Graph;
+}
+}
+return nullptr;
+}
+
+UEdGraph* UGenBlueprintUtils::FindGraphByPath(UBlueprint* Blueprint, const FString& NormalizedGraphPath)
+{
+if (!Blueprint || NormalizedGraphPath.IsEmpty()) return nullptr;
+
+// Strip any leading/trailing slashes and use '/' as separator.
+FString Sanitized = NormalizedGraphPath;
+Sanitized.TrimStartAndEndInline();
+while (Sanitized.StartsWith(TEXT("/"))) Sanitized.RightChopInline(1);
+while (Sanitized.EndsWith(TEXT("/"))) Sanitized.LeftChopInline(1);
+
+TArray<FString> Segments;
+Sanitized.ParseIntoArray(Segments, TEXT("/"), true);
+if (Segments.Num() == 0) return nullptr;
+
+TArray<UEdGraph*> AllGraphs;
+Blueprint->GetAllGraphs(AllGraphs);
+
+for (UEdGraph* Graph : AllGraphs)
+{
+if (!Graph) continue;
+
+// Reconstruct the hierarchical name for this graph by walking parents.
+TArray<FString> ReverseSegments;
+UObject* Current = Graph;
+while (Current)
+{
+if (UEdGraph* CurrentGraph = Cast<UEdGraph>(Current))
+{
+ReverseSegments.Add(CurrentGraph->GetName());
+Current = CurrentGraph->GetOuter();
+if (Current && Current->IsA<UBlueprint>()) break;
+}
+else
+{
+break;
+}
+}
+
+if (ReverseSegments.Num() != Segments.Num()) continue;
+
+bool bMatches = true;
+for (int32 i = 0; i < Segments.Num(); ++i)
+{
+const FString& Expect = Segments[i];
+const FString& Actual = ReverseSegments[ReverseSegments.Num() - 1 - i];
+if (!Expect.Equals(Actual, ESearchCase::IgnoreCase))
+{
+bMatches = false;
+break;
+}
+}
+if (bMatches) return Graph;
+}
+
+// Fallback: match on final segment only.
+const FString& Leaf = Segments.Last();
+for (UEdGraph* Graph : AllGraphs)
+{
+if (Graph && Graph->GetName().Equals(Leaf, ESearchCase::IgnoreCase))
+{
+return Graph;
+}
+}
+return nullptr;
+}
+
+FString UGenBlueprintUtils::ClassifyGraphKind(UBlueprint* Blueprint, UEdGraph* Graph)
+{
+if (!Blueprint || !Graph) return TEXT("Unknown");
+
+if (Blueprint->UbergraphPages.Contains(Graph)) return TEXT("Ubergraph");
+if (Blueprint->FunctionGraphs.Contains(Graph)) return TEXT("Function");
+if (Blueprint->MacroGraphs.Contains(Graph)) return TEXT("Macro");
+if (Blueprint->DelegateSignatureGraphs.Contains(Graph)) return TEXT("Delegate");
+if (Blueprint->IntermediateGeneratedGraphs.Contains(Graph)) return TEXT("Intermediate");
+return TEXT("Subgraph");
+}
+
+// -----------------------------------------------------------------------------
+// New JSON inspection entry points
+// -----------------------------------------------------------------------------
+
+static FString SerializeJsonObject(const TSharedRef<FJsonObject>& Object)
+{
+FString Output;
+TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
+FJsonSerializer::Serialize(Object, Writer);
+return Output;
+}
+
+FString UGenBlueprintUtils::GetAllGraphsJson(const FString& BlueprintPath)
+{
+TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+if (!Blueprint)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error"), TEXT("Could not load blueprint"));
+return SerializeJsonObject(Root);
+}
+
+TArray<UEdGraph*> Graphs;
+Blueprint->GetAllGraphs(Graphs);
+
+TArray<TSharedPtr<FJsonValue>> Entries;
+for (UEdGraph* Graph : Graphs)
+{
+if (!Graph) continue;
+TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+Entry->SetStringField(TEXT("name"), Graph->GetName());
+Entry->SetStringField(TEXT("path"), Graph->GetPathName());
+Entry->SetStringField(TEXT("guid"), Graph->GraphGuid.ToString());
+Entry->SetStringField(TEXT("kind"), ClassifyGraphKind(Blueprint, Graph));
+Entries.Add(MakeShared<FJsonValueObject>(Entry));
+}
+
+Root->SetBoolField(TEXT("success"), true);
+Root->SetArrayField(TEXT("graphs"), Entries);
+return SerializeJsonObject(Root);
+}
+
+FString UGenBlueprintUtils::ResolveGraphByPath(const FString& BlueprintPath, const FString& GraphPath)
+{
+TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+if (!Blueprint)
+{
+Root->SetBoolField(TEXT("found"), false);
+Root->SetStringField(TEXT("error"), TEXT("Could not load blueprint"));
+return SerializeJsonObject(Root);
+}
+
+UEdGraph* Graph = FindGraphByPath(Blueprint, GraphPath);
+if (!Graph)
+{
+Root->SetBoolField(TEXT("found"), false);
+Root->SetStringField(TEXT("graph_path"), GraphPath);
+Root->SetStringField(TEXT("error_code"), TEXT("GRAPH_NOT_FOUND"));
+return SerializeJsonObject(Root);
+}
+
+Root->SetBoolField(TEXT("found"), true);
+Root->SetStringField(TEXT("graph_path"), GraphPath);
+Root->SetStringField(TEXT("name"), Graph->GetName());
+Root->SetStringField(TEXT("guid"), Graph->GraphGuid.ToString());
+Root->SetStringField(TEXT("kind"), ClassifyGraphKind(Blueprint, Graph));
+return SerializeJsonObject(Root);
+}
+
+static TSharedRef<FJsonObject> SerializePin(UEdGraphPin* Pin)
+{
+TSharedRef<FJsonObject> PinObj = MakeShared<FJsonObject>();
+if (!Pin) return PinObj;
+PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+PinObj->SetStringField(TEXT("category"), Pin->PinType.PinCategory.ToString());
+PinObj->SetStringField(TEXT("sub_category"), Pin->PinType.PinSubCategory.ToString());
+if (Pin->PinType.PinSubCategoryObject.IsValid())
+{
+PinObj->SetStringField(TEXT("sub_category_object"), Pin->PinType.PinSubCategoryObject->GetPathName());
+}
+PinObj->SetStringField(TEXT("container_type"),
+Pin->PinType.ContainerType == EPinContainerType::Array ? TEXT("array") :
+Pin->PinType.ContainerType == EPinContainerType::Set ? TEXT("set") :
+Pin->PinType.ContainerType == EPinContainerType::Map ? TEXT("map") : TEXT("none"));
+PinObj->SetBoolField(TEXT("is_reference"), Pin->PinType.bIsReference);
+PinObj->SetBoolField(TEXT("is_const"), Pin->PinType.bIsConst);
+return PinObj;
+}
+
+FString UGenBlueprintUtils::GetGraphNodesJson(const FString& BlueprintPath, const FString& GraphPath)
+{
+TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+if (!Blueprint)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error"), TEXT("Could not load blueprint"));
+return SerializeJsonObject(Root);
+}
+
+UEdGraph* Graph = FindGraphByPath(Blueprint, GraphPath);
+if (!Graph)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error_code"), TEXT("GRAPH_NOT_FOUND"));
+return SerializeJsonObject(Root);
+}
+
+TArray<TSharedPtr<FJsonValue>> Nodes;
+for (UEdGraphNode* Node : Graph->Nodes)
+{
+if (!Node) continue;
+TSharedRef<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+NodeObj->SetStringField(TEXT("guid"), Node->NodeGuid.ToString());
+NodeObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
+NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+NodeObj->SetNumberField(TEXT("pos_x"), Node->NodePosX);
+NodeObj->SetNumberField(TEXT("pos_y"), Node->NodePosY);
+Nodes.Add(MakeShared<FJsonValueObject>(NodeObj));
+}
+
+Root->SetBoolField(TEXT("success"), true);
+Root->SetArrayField(TEXT("nodes"), Nodes);
+return SerializeJsonObject(Root);
+}
+
+FString UGenBlueprintUtils::GetGraphPinsJson(const FString& BlueprintPath, const FString& GraphPath, const FString& NodeGuid)
+{
+TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+if (!Blueprint)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error"), TEXT("Could not load blueprint"));
+return SerializeJsonObject(Root);
+}
+
+UEdGraph* Graph = FindGraphByPath(Blueprint, GraphPath);
+if (!Graph)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error_code"), TEXT("GRAPH_NOT_FOUND"));
+return SerializeJsonObject(Root);
+}
+
+FGuid Target;
+FGuid::Parse(NodeGuid, Target);
+UEdGraphNode* FoundNode = nullptr;
+for (UEdGraphNode* Node : Graph->Nodes)
+{
+if (Node && Node->NodeGuid == Target) { FoundNode = Node; break; }
+}
+if (!FoundNode)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error_code"), TEXT("NODE_NOT_FOUND"));
+return SerializeJsonObject(Root);
+}
+
+TArray<TSharedPtr<FJsonValue>> Pins;
+for (UEdGraphPin* Pin : FoundNode->Pins)
+{
+Pins.Add(MakeShared<FJsonValueObject>(SerializePin(Pin)));
+}
+Root->SetBoolField(TEXT("success"), true);
+Root->SetArrayField(TEXT("pins"), Pins);
+return SerializeJsonObject(Root);
+}
+
+FString UGenBlueprintUtils::ResolveNodeBySelector(const FString& BlueprintPath, const FString& GraphPath,
+                                                 const FString& Identifier, const FString& Kind)
+{
+TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+if (!Blueprint)
+{
+Root->SetBoolField(TEXT("found"), false);
+Root->SetStringField(TEXT("error"), TEXT("Could not load blueprint"));
+return SerializeJsonObject(Root);
+}
+
+UEdGraph* Graph = FindGraphByPath(Blueprint, GraphPath);
+if (!Graph)
+{
+Root->SetBoolField(TEXT("found"), false);
+Root->SetStringField(TEXT("error_code"), TEXT("GRAPH_NOT_FOUND"));
+return SerializeJsonObject(Root);
+}
+
+FGuid GuidCandidate;
+const bool bGuidValid = FGuid::Parse(Identifier, GuidCandidate);
+
+UEdGraphNode* Match = nullptr;
+for (UEdGraphNode* Node : Graph->Nodes)
+{
+if (!Node) continue;
+if (bGuidValid && Node->NodeGuid == GuidCandidate) { Match = Node; break; }
+if (Kind.Equals(TEXT("event"), ESearchCase::IgnoreCase))
+{
+if (UK2Node_Event* Evt = Cast<UK2Node_Event>(Node))
+{
+if (Evt->EventReference.GetMemberName().ToString().Equals(Identifier, ESearchCase::IgnoreCase))
+{
+Match = Node;
+break;
+}
+}
+}
+if (Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString().Equals(Identifier, ESearchCase::IgnoreCase))
+{
+Match = Node;
+}
+}
+
+if (!Match)
+{
+Root->SetBoolField(TEXT("found"), false);
+Root->SetStringField(TEXT("error_code"), TEXT("NODE_NOT_FOUND"));
+return SerializeJsonObject(Root);
+}
+
+Root->SetBoolField(TEXT("found"), true);
+Root->SetStringField(TEXT("node_guid"), Match->NodeGuid.ToString());
+Root->SetStringField(TEXT("class"), Match->GetClass()->GetName());
+Root->SetStringField(TEXT("title"), Match->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+return SerializeJsonObject(Root);
+}
+
+FString UGenBlueprintUtils::CompileBlueprintWithDiagnostics(const FString& BlueprintPath)
+{
+TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+UBlueprint* Blueprint = LoadBlueprintAsset(BlueprintPath);
+if (!Blueprint)
+{
+Root->SetBoolField(TEXT("success"), false);
+Root->SetStringField(TEXT("error"), TEXT("Could not load blueprint"));
+return SerializeJsonObject(Root);
+}
+
+// Prevalidate: exec-output pins with more than one outgoing connection are
+// the classic silent-repair case.  Surface them as warnings instead of
+// mutating the graph.
+TArray<TSharedPtr<FJsonValue>> Warnings;
+TArray<UEdGraph*> AllGraphs;
+Blueprint->GetAllGraphs(AllGraphs);
+for (UEdGraph* Graph : AllGraphs)
+{
+if (!Graph) continue;
+for (UEdGraphNode* Node : Graph->Nodes)
+{
+if (!Node) continue;
+for (UEdGraphPin* Pin : Node->Pins)
+{
+if (Pin && Pin->Direction == EGPD_Output
+&& Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec
+&& Pin->LinkedTo.Num() > 1)
+{
+TSharedRef<FJsonObject> Warn = MakeShared<FJsonObject>();
+Warn->SetStringField(TEXT("message"), FString::Printf(
+TEXT("Exec output pin %s on node %s has %d outgoing links; only one is allowed."),
+*Pin->PinName.ToString(),
+*Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString(),
+Pin->LinkedTo.Num()));
+Warn->SetStringField(TEXT("graph"), Graph->GetName());
+Warn->SetStringField(TEXT("node_guid"), Node->NodeGuid.ToString());
+Warn->SetStringField(TEXT("error_code"), TEXT("EXEC_PIN_MULTIPLE_OUTPUTS"));
+Warnings.Add(MakeShared<FJsonValueObject>(Warn));
+}
+}
+}
+}
+
+FCompilerResultsLog Results;
+Results.SetSourcePath(BlueprintPath);
+FKismetEditorUtilities::FCompileBlueprintOptions Options;
+Options.bIsRegeneratingOnLoad = false;
+Options.bSaveIntermediateProducts = false;
+FKismetEditorUtilities::CompileBlueprint(Blueprint, Options, &Results);
+
+TArray<TSharedPtr<FJsonValue>> Errors;
+for (const TSharedRef<FTokenizedMessage>& Msg : Results.Messages)
+{
+TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
+Obj->SetStringField(TEXT("message"), Msg->ToText().ToString());
+if (Msg->GetSeverity() == EMessageSeverity::Error
+|| Msg->GetSeverity() == EMessageSeverity::CriticalError)
+{
+Errors.Add(MakeShared<FJsonValueObject>(Obj));
+}
+else if (Msg->GetSeverity() == EMessageSeverity::Warning
+|| Msg->GetSeverity() == EMessageSeverity::PerformanceWarning)
+{
+Warnings.Add(MakeShared<FJsonValueObject>(Obj));
+}
+}
+
+Root->SetBoolField(TEXT("success"), Results.NumErrors == 0);
+Root->SetNumberField(TEXT("num_errors"), Results.NumErrors);
+Root->SetNumberField(TEXT("num_warnings"), Results.NumWarnings);
+Root->SetArrayField(TEXT("warnings"), Warnings);
+Root->SetArrayField(TEXT("errors"), Errors);
+return SerializeJsonObject(Root);
 }

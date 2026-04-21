@@ -2,7 +2,7 @@ import textwrap
 
 import unreal
 import sys
-from typing import Dict, Any
+from typing import Any, Dict, List
 import os
 import uuid
 import time
@@ -10,6 +10,13 @@ import traceback
 
 # Assuming a logging module similar to your example
 from utils import logging as log
+
+try:
+    from utils.mcp_response import err, ok
+    from utils.safety import classify_script, summarize_dirty_packages
+except ImportError:  # pragma: no cover - alt import path under pytest
+    from Content.Python.utils.mcp_response import err, ok
+    from Content.Python.utils.safety import classify_script, summarize_dirty_packages
 
 
 def execute_script(script_file, output_file, error_file, status_file):
@@ -83,49 +90,101 @@ def get_recent_unreal_logs(start_line=None):
         return None
 
 
+def _snapshot_dirty_packages() -> List[str]:
+    try:
+        editor_loading = getattr(unreal, "EditorLoadingAndSavingUtils", None)
+        if editor_loading is None:
+            return []
+        getter = getattr(editor_loading, "get_dirty_content_packages", None) or getattr(
+            editor_loading, "get_dirty_packages", None
+        )
+        if not callable(getter):
+            return []
+        packages = getter() or []
+        return summarize_dirty_packages(packages)
+    except Exception:
+        return []
+
+
+def _diff_changed_packages(before: List[str], after: List[str]) -> List[str]:
+    before_set = set(before or [])
+    return [pkg for pkg in (after or []) if pkg not in before_set]
+
+
 def handle_execute_python(command: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Handle a command to execute a Python script in Unreal Engine
-    
+    Handle a command to execute a Python script in Unreal Engine.
+
+    The script tag is treated as ``unsafe`` -- callers should prefer the
+    semantic MCP tools when possible.
+
     Args:
         command: The command dictionary containing:
             - script: The Python code to execute as a string
-            - force: Optional boolean to bypass safety checks (default: False)
-            
-    Returns:
-        Response dictionary with success/failure status and output if successful
+            - force: Optional boolean to bypass destructive-script checks
+            - read_only: When true, refuse scripts classified as destructive
+              and skip execution that would mutate disk
+            - dry_run: When true, return the classification without executing
     """
+    script_file = output_file = error_file = status_file = None
     try:
         script = command.get("script")
-        force = command.get("force", False)
+        force = bool(command.get("force", False))
+        read_only = bool(command.get("read_only", False))
+        dry_run = bool(command.get("dry_run", False))
 
         if not script:
             log.log_error("Missing required parameter for execute_python: script")
-            return {"success": False, "error": "Missing required parameter: script"}
+            return err(
+                "Missing required parameter: script",
+                error_code="SCRIPT_REQUIRED",
+                data={"unsafe": True},
+            )
 
         log.log_command("execute_python", f"Script: {script[:50]}...")
 
-        # Get log line count before execution
-        log_start_line = get_log_line_count()
+        classification = classify_script(script)
+        warnings: List[str] = ["execute_python is an unsafe command; prefer semantic MCP tools when possible."]
 
-        destructive_keywords = [
-            "unreal.EditorAssetLibrary.delete_asset",
-            "unreal.EditorLevelLibrary.destroy_actor",
-            "unreal.save_package",
-            "os.remove",
-            "shutil.rmtree",
-            "file.write",
-            "unreal.EditorAssetLibrary.save_asset"
-        ]
-        is_destructive = any(keyword in script for keyword in destructive_keywords)
+        if read_only and classification.is_destructive:
+            return err(
+                "Script is classified as destructive but read_only=True was requested.",
+                error_code="UNSAFE_COMMAND_REQUIRED",
+                data={
+                    "classification": classification.to_dict(),
+                    "unsafe": True,
+                },
+                warnings=warnings,
+            )
 
-        if is_destructive and not force:
+        if classification.requires_force and not force:
             log.log_warning("Potentially destructive script detected")
-            return {
-                "success": False,
-                "error": ("This script may involve destructive actions (e.g., deleting or saving files) "
-                          "not explicitly requested. Please confirm with 'Yes, execute it' or set force=True.")
-            }
+            return err(
+                (
+                    "This script may involve destructive actions (e.g., deleting or saving files) "
+                    "not explicitly requested. Please confirm with 'Yes, execute it' or set force=True."
+                ),
+                error_code="UNSAFE_COMMAND_REQUIRED",
+                data={
+                    "classification": classification.to_dict(),
+                    "unsafe": True,
+                },
+                warnings=warnings,
+            )
+
+        if dry_run:
+            return ok(
+                "Dry run complete; script not executed.",
+                data={
+                    "classification": classification.to_dict(),
+                    "unsafe": True,
+                    "executed": False,
+                },
+                warnings=warnings,
+            )
+
+        log_start_line = log.get_log_line_count()
+        dirty_before = _snapshot_dirty_packages()
 
         temp_dir = os.path.join(unreal.Paths.project_saved_dir(), "Temp", "PythonExec")
         if not os.path.exists(temp_dir):
@@ -136,17 +195,15 @@ def handle_execute_python(command: Dict[str, Any]) -> Dict[str, Any]:
         error_file = os.path.join(temp_dir, "error.txt")
         status_file = os.path.join(temp_dir, "status.txt")
 
-        # Normalize user script indentation and write to file
         dedented_script = textwrap.dedent(script).strip()
         with open(script_file, 'w') as f:
             f.write(dedented_script)
 
-        # Execute using the wrapper
         execute_script(script_file, output_file, error_file, status_file)
-        time.sleep(0.5)  # Allow execution to complete
+        time.sleep(0.5)
 
         output = ""
-        error = ""
+        error_text = ""
         success = False
 
         if os.path.exists(output_file):
@@ -154,125 +211,138 @@ def handle_execute_python(command: Dict[str, Any]) -> Dict[str, Any]:
                 output = f.read()
         if os.path.exists(error_file):
             with open(error_file, 'r') as f:
-                error = f.read()
+                error_text = f.read()
         if os.path.exists(status_file):
             with open(status_file, 'r') as f:
                 success = f.read().strip() == "1"
 
-        for file in [script_file, output_file, error_file, status_file]:
-            if os.path.exists(file):
-                os.remove(file)
+        for path in [script_file, output_file, error_file, status_file]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
-        # Enhanced error handling for common Unreal API issues
-        if not success and error:
-            if "set_world_location() required argument 'sweep'" in error:
-                error += "\n\nHINT: The set_world_location() method requires a 'sweep' parameter. Try: set_world_location(location, sweep=False)"
-            elif "set_world_location() required argument 'teleport'" in error:
-                error += "\n\nHINT: The set_world_location() method requires 'teleport' parameter. Try: set_world_location(location, sweep=False, teleport=False)"
-            elif "set_actor_location() required argument 'teleport'" in error:
-                error += "\n\nHINT: The set_actor_location() method requires a 'teleport' parameter. Try: set_actor_location(location, sweep=False, teleport=False)"
+        recent_logs = log.get_recent_unreal_logs(log_start_line)
+        dirty_after = _snapshot_dirty_packages()
+        changed_assets = _diff_changed_packages(dirty_before, dirty_after)
 
-            # Get only new log entries
-            recent_logs = get_recent_unreal_logs(log_start_line)
-            if recent_logs:
-                error += "\n\nNew Unreal logs during execution:\n" + recent_logs
+        if not success and error_text:
+            if "set_world_location() required argument 'sweep'" in error_text:
+                error_text += "\n\nHINT: set_world_location() requires sweep=False."
+            elif "set_world_location() required argument 'teleport'" in error_text:
+                error_text += "\n\nHINT: set_world_location() requires teleport=False."
+            elif "set_actor_location() required argument 'teleport'" in error_text:
+                error_text += "\n\nHINT: set_actor_location() requires teleport=False."
+
+        data = {
+            "executed": True,
+            "unsafe": True,
+            "classification": classification.to_dict(),
+            "output": output,
+            "recent_logs": recent_logs,
+            "dirty_packages": dirty_after,
+            "changed_assets": changed_assets,
+        }
 
         if success:
-            # Get only new log entries for successful execution as well
-            recent_logs = get_recent_unreal_logs(log_start_line)
-            if recent_logs:
-                output += "\n\nNew Unreal logs during execution:\n" + recent_logs
-                
-            log.log_result("execute_python", True, f"Script executed with output: {output}")
-            return {"success": True, "output": output}
-        else:
-            log.log_error(f"Script execution failed with error: {error}")
-            return {"success": False, "error": error if error else "Execution failed without specific error", "output": output}
+            log.log_result("execute_python", True, "Script executed.")
+            return ok("Script executed.", data=data, warnings=warnings)
 
-    except Exception as e:
-        log.log_error(f"Error handling execute_python: {str(e)}", include_traceback=True)
-        return {"success": False, "error": str(e)}
+        data["error"] = error_text or "Execution failed without specific error"
+        log.log_error(f"Script execution failed: {error_text}")
+        return err(
+            data["error"],
+            error_code="EXECUTE_PYTHON_FAILED",
+            data=data,
+            warnings=warnings,
+        )
+
+    except Exception as exc:
+        log.log_error(f"Error handling execute_python: {exc}", include_traceback=True)
+        return err(
+            str(exc),
+            error_code="EXECUTE_PYTHON_FAILED",
+            data={"unsafe": True},
+        )
     finally:
-        for file in [script_file, output_file, error_file, status_file]:
-            if os.path.exists(file):
+        for path in [script_file, output_file, error_file, status_file]:
+            if path and os.path.exists(path):
                 try:
-                    os.remove(file)
-                except:
+                    os.remove(path)
+                except Exception:
                     pass
 
 
 def handle_execute_unreal_command(command: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Handle a command to execute an Unreal Engine console command
-    
+    Handle a command to execute an Unreal Engine console command.
+
     Args:
         command: The command dictionary containing:
             - command: The Unreal Engine console command to execute
             - force: Optional boolean to bypass safety checks (default: False)
-            
-    Returns:
-        Response dictionary with success/failure status and output if successful
     """
-    script_file = None
-    output_file = None
-    error_file = None
-    
     try:
         cmd = command.get("command")
-        force = command.get("force", False)
+        force = bool(command.get("force", False))
 
         if not cmd:
             log.log_error("Missing required parameter for execute_unreal_command: command")
-            return {"success": False, "error": "Missing required parameter: command"}
+            return err(
+                "Missing required parameter: command",
+                error_code="COMMAND_REQUIRED",
+                data={"unsafe": True},
+            )
 
         if cmd.strip().lower().startswith("py "):
             log.log_error("Attempted to run a Python script with execute_unreal_command")
-            return {
-                "success": False,
-                "error": ("Use 'execute_python' command to run Python scripts instead of 'execute_unreal_command' with 'py'. "
-                          "For example, send {'type': 'execute_python', 'script': 'your_code_here'}.")
-            }
+            return err(
+                (
+                    "Use 'execute_python' to run Python scripts instead of "
+                    "'execute_unreal_command' with the 'py' prefix."
+                ),
+                error_code="WRONG_COMMAND_TYPE",
+                data={"unsafe": True},
+            )
 
         log.log_command("execute_unreal_command", f"Command: {cmd}")
-
-        # Get log line count before execution
-        log_start_line = get_log_line_count()
+        log_start_line = log.get_log_line_count()
 
         destructive_keywords = ["delete", "save", "quit", "exit", "restart"]
         is_destructive = any(keyword in cmd.lower() for keyword in destructive_keywords)
+        warnings: List[str] = ["execute_unreal_command is an unsafe command."]
 
         if is_destructive and not force:
             log.log_warning("Potentially destructive command detected")
-            return {
-                "success": False,
-                "error": ("This command may involve destructive actions (e.g., deleting or saving). "
-                          "Please confirm with 'Yes, execute it' or set force=True.")
-            }
+            return err(
+                (
+                    "This command may involve destructive actions. "
+                    "Confirm with 'Yes, execute it' or set force=True."
+                ),
+                error_code="UNSAFE_COMMAND_REQUIRED",
+                data={"unsafe": True},
+                warnings=warnings,
+            )
 
-        # Execute the command
         world = unreal.EditorLevelLibrary.get_editor_world()
         unreal.SystemLibrary.execute_console_command(world, cmd)
-        
-        # Add a short delay to allow logs to be captured
-        time.sleep(1.0)  # Slightly longer delay to ensure logs are written
-        
-        # Get new log entries generated during command execution
-        recent_logs = get_recent_unreal_logs(log_start_line)
-        
-        output = f"Command '{cmd}' executed successfully"
-        if recent_logs:
-            output += "\n\nRelated Unreal logs:\n" + recent_logs
-            
+        time.sleep(1.0)
+
+        recent_logs = log.get_recent_unreal_logs(log_start_line)
+
         log.log_result("execute_unreal_command", True, f"Command '{cmd}' executed")
-        return {"success": True, "output": output}
-        
-    except Exception as e:
-        # Get new log entries to provide context for the error
-        recent_logs = get_recent_unreal_logs(log_start_line) if 'log_start_line' in locals() else None
-        error_msg = f"Error executing command: {str(e)}"
-        
-        if recent_logs:
-            error_msg += "\n\nUnreal logs around the time of error:\n" + recent_logs
-            
-        log.log_error(f"Error handling execute_unreal_command: {str(e)}", include_traceback=True)
-        return {"success": False, "error": error_msg}
+        return ok(
+            f"Command '{cmd}' executed.",
+            data={"command": cmd, "recent_logs": recent_logs, "unsafe": True},
+            warnings=warnings,
+        )
+
+    except Exception as exc:
+        log.log_error(f"Error handling execute_unreal_command: {exc}", include_traceback=True)
+        recent_logs = log.get_recent_unreal_logs(0)
+        return err(
+            str(exc),
+            error_code="EXECUTE_UNREAL_COMMAND_FAILED",
+            data={"recent_logs": recent_logs, "unsafe": True},
+        )
