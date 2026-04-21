@@ -38,6 +38,9 @@ DESTRUCTIVE_SUBSTRINGS: tuple = (
     "shutil.move",
     "open(",
     "pathlib.path.unlink",
+    # Crash-triggering level-instance editor combo (postmortem UE 5.4.4).
+    "levelstreaminglevelinstanceeditor",
+    "add_level_to_world_with_transform",
 )
 
 
