@@ -174,14 +174,69 @@ def handle_create_material(command: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_get_all_scene_objects(command: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a structured list of actors in the current editor world.
+
+    The previous implementation called ``EditorLevelLibrary.get_level(world)``
+    which no longer exists on UE 5.4 and returned
+    ``type object 'EditorLevelLibrary' has no attribute 'get_level'``.
+    We now prefer the ``EditorActorSubsystem`` (UE 5.1+) and fall back to
+    ``GameplayStatics.get_all_actors_of_class`` so existing callers keep
+    working.
+    """
     try:
-        level = unreal.EditorLevelLibrary.get_level(unreal.EditorLevelLibrary.get_editor_world())
-        actors = unreal.GameplayStatics.get_all_actors_of_class(level, unreal.Actor)
-        result = [
-            {"name": actor.get_name(), "class": actor.get_class().get_name(), "location": [actor.get_actor_location().x, actor.get_actor_location().y, actor.get_actor_location().z]}
-            for actor in actors
-        ]
-        return {"success": True, "actors": result}
+        actors: List[Any] = []
+
+        # Primary path: EditorActorSubsystem (available since UE 5.1).
+        get_sub = getattr(unreal, "get_editor_subsystem", None)
+        actor_sub_cls = getattr(unreal, "EditorActorSubsystem", None)
+        if callable(get_sub) and actor_sub_cls is not None:
+            try:
+                sub = get_sub(actor_sub_cls)
+                if sub is not None:
+                    actors = list(sub.get_all_level_actors() or [])
+            except Exception:
+                actors = []
+
+        # Fallback: GameplayStatics.get_all_actors_of_class(world, Actor).
+        if not actors:
+            world = None
+            ued_sub_cls = getattr(unreal, "UnrealEditorSubsystem", None)
+            if callable(get_sub) and ued_sub_cls is not None:
+                try:
+                    ued = get_sub(ued_sub_cls)
+                    if ued is not None:
+                        world = ued.get_editor_world()
+                except Exception:
+                    world = None
+            if world is None:
+                legacy = getattr(unreal, "EditorLevelLibrary", None)
+                if legacy is not None and hasattr(legacy, "get_editor_world"):
+                    try:
+                        world = legacy.get_editor_world()
+                    except Exception:
+                        world = None
+            actor_cls = getattr(unreal, "Actor", None)
+            gs = getattr(unreal, "GameplayStatics", None)
+            if world is not None and actor_cls is not None and gs is not None:
+                try:
+                    actors = list(gs.get_all_actors_of_class(world, actor_cls) or [])
+                except Exception:
+                    actors = []
+
+        result = []
+        for actor in actors:
+            try:
+                loc = actor.get_actor_location()
+                entry = {
+                    "name": str(actor.get_name()),
+                    "label": str(actor.get_actor_label()),
+                    "class": str(actor.get_class().get_name()),
+                    "location": [float(loc.x), float(loc.y), float(loc.z)],
+                }
+            except Exception:
+                continue
+            result.append(entry)
+        return {"success": True, "actors": result, "count": len(result)}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
