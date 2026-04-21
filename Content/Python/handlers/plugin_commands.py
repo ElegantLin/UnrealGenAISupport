@@ -622,6 +622,19 @@ def handle_request_editor_restart(command: Dict[str, Any]) -> Dict[str, Any]:
             }
 
         scheduled_at = _schedule_editor_exit(delay_seconds)
+
+        # P1.5: snapshot the current editor state so it can be restored after
+        # the launcher relaunches the project.  Best-effort: failure to save
+        # the session must not block the restart itself.
+        session_snapshot: Dict[str, Any] = {}
+        try:
+            from handlers import session_commands as _session_commands
+            save_response = _session_commands.handle_save_editor_session({})
+            if save_response.get("success"):
+                session_snapshot = save_response.get("data", {}).get("snapshot", {})
+        except Exception as snapshot_exc:  # pragma: no cover - defensive
+            log.log_error(f"Editor session snapshot skipped: {snapshot_exc}")
+
         log.log_result(
             "request_editor_restart",
             True,
@@ -634,6 +647,7 @@ def handle_request_editor_restart(command: Dict[str, Any]) -> Dict[str, Any]:
             "dirty_package_count": len(dirty_packages),
             "delay_seconds": max(delay_seconds, 0.1),
             "scheduled_at": scheduled_at,
+            "session_snapshot_captured": bool(session_snapshot),
         }
     except Exception as exc:
         log.log_error(f"Error scheduling editor restart: {exc}", include_traceback=True)
