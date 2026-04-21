@@ -114,6 +114,31 @@ def _load_unreal_socket_server(monkeypatch):
             "handle_replace_blend_space_samples",
             "handle_set_blend_space_sample_animation",
         ],
+        "actor_batch_commands": [
+            "handle_duplicate_actors",
+            "handle_replace_static_mesh",
+            "handle_replace_material",
+            "handle_group_actors",
+            "handle_select_actors",
+        ],
+        "level_commands": [
+            "handle_create_level_from_template",
+            "handle_create_level_instance_from_selection",
+            "handle_spawn_level_instance",
+            "handle_add_level_to_world",
+            "handle_list_level_instances",
+        ],
+        "landscape_commands": [
+            "handle_create_landscape",
+            "handle_set_landscape_material",
+        ],
+        "viewport_commands": [
+            "handle_capture_editor_viewport",
+        ],
+        "project_settings_commands": [
+            "handle_set_project_setting",
+            "handle_set_rendering_defaults",
+        ],
         "anim_blueprint_commands": [
             "handle_get_anim_blueprint_structure",
             "handle_get_graph_nodes",

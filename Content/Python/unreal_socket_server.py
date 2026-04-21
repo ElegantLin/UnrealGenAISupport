@@ -10,6 +10,7 @@ import unreal
 
 from handlers import (
     actor_commands,
+    actor_batch_commands,
     anim_blueprint_commands,
     animation_commands,
     basic_commands,
@@ -17,12 +18,16 @@ from handlers import (
     blueprint_inspect_commands,
     fab_commands,
     input_commands,
+    landscape_commands,
+    level_commands,
     plugin_commands,
     preflight_commands,
+    project_settings_commands,
     python_commands,
     session_commands,
     transaction_commands,
     ui_commands,
+    viewport_commands,
 )
 from utils import logging as log
 
@@ -368,6 +373,31 @@ class CommandDispatcher:
             "get_all_scene_objects": basic_commands.handle_get_all_scene_objects,
             "create_project_folder": basic_commands.handle_create_project_folder,
             "get_files_in_folder": basic_commands.handle_get_files_in_folder,
+
+            # Level / level-instance (postmortem)
+            "create_level_from_template": level_commands.handle_create_level_from_template,
+            "create_level_instance_from_selection": level_commands.handle_create_level_instance_from_selection,
+            "spawn_level_instance": level_commands.handle_spawn_level_instance,
+            "add_level_to_world": level_commands.handle_add_level_to_world,
+            "list_level_instances": level_commands.handle_list_level_instances,
+
+            # Landscape (postmortem)
+            "create_landscape": landscape_commands.handle_create_landscape,
+            "set_landscape_material": landscape_commands.handle_set_landscape_material,
+
+            # Editor viewport capture (postmortem)
+            "capture_editor_viewport": viewport_commands.handle_capture_editor_viewport,
+
+            # Project settings (postmortem)
+            "set_project_setting": project_settings_commands.handle_set_project_setting,
+            "set_rendering_defaults": project_settings_commands.handle_set_rendering_defaults,
+
+            # Actor batch operations (postmortem)
+            "duplicate_actors": actor_batch_commands.handle_duplicate_actors,
+            "replace_static_mesh": actor_batch_commands.handle_replace_static_mesh,
+            "replace_material": actor_batch_commands.handle_replace_material,
+            "group_actors": actor_batch_commands.handle_group_actors,
+            "select_actors": actor_batch_commands.handle_select_actors,
 
             # Input
             "add_input_binding": basic_commands.handle_add_input_binding,

@@ -2747,6 +2747,310 @@ def search_and_add_free_fab_asset(
     return json.dumps(combined_response)
 
 
+# ===========================================================================
+# Postmortem-driven MCP tools: level instances, landscape, viewport capture,
+# project settings, and batch actor operations.
+# ===========================================================================
+
+
+@mcp.tool()
+def create_level_from_template(level_path: str, template: str = "Basic") -> dict:
+    """Create a new empty/basic level asset from an engine template.
+
+    Args:
+        level_path: Destination asset path, e.g. ``/Game/Maps/MyLevel``.
+        template: ``Basic`` | ``Empty`` | an explicit ``/Engine/Maps/...`` path.
+    """
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "create_level_from_template", "level_path": level_path, "template": template}),
+        success_message=f"Created level {level_path}",
+        error_code="LEVEL_OPERATION_FAILED",
+        default_error="Failed to create level from template.",
+    )
+
+
+@mcp.tool()
+def create_level_instance_from_selection(
+    output_level_path: str,
+    actor_names: list = None,
+    pivot_mode: str = "CenterMinZ",
+    external_actors: bool = True,
+) -> dict:
+    """Wrap the ``Level > Create Level Instance`` editor action.
+
+    Args:
+        output_level_path: Destination level asset (``/Game/Maps/...``).
+        actor_names: Explicit labels/names, or ``None`` to use current selection.
+        pivot_mode: Pivot placement strategy (``CenterMinZ`` / ``WorldOrigin`` etc.).
+        external_actors: Whether to create the level with external actors enabled.
+    """
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "create_level_instance_from_selection",
+            "output_level_path": output_level_path,
+            "actor_names": list(actor_names or []),
+            "pivot_mode": pivot_mode,
+            "external_actors": external_actors,
+        }),
+        success_message=f"Created level instance {output_level_path}",
+        error_code="LEVEL_OPERATION_FAILED",
+        default_error="Failed to create level instance from selection.",
+    )
+
+
+@mcp.tool()
+def spawn_level_instance(
+    level_asset_path: str,
+    location: list = None,
+    rotation: list = None,
+    scale: list = None,
+    runtime_behavior: str = "Embedded",
+    actor_label: str = "",
+) -> dict:
+    """Spawn an ``ALevelInstance`` actor in the current world bound to a level asset."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "spawn_level_instance",
+            "level_asset_path": level_asset_path,
+            "location": list(location or [0, 0, 0]),
+            "rotation": list(rotation or [0, 0, 0]),
+            "scale": list(scale or [1, 1, 1]),
+            "runtime_behavior": runtime_behavior,
+            "actor_label": actor_label,
+        }),
+        success_message=f"Spawned level instance {level_asset_path}",
+        error_code="LEVEL_OPERATION_FAILED",
+        default_error="Failed to spawn level instance.",
+    )
+
+
+@mcp.tool()
+def add_level_to_world(
+    level_path: str,
+    mode: str = "sublevel",
+    location: list = None,
+    rotation: list = None,
+    streaming_class: str = "",
+) -> dict:
+    """Add a level asset to the current world.
+
+    ``mode`` must be one of ``sublevel`` / ``level_instance`` / ``packed_level``.
+    The crash-triggering ``LevelStreamingLevelInstanceEditor`` streaming class
+    is refused outright; callers should use ``spawn_level_instance`` or
+    ``create_level_instance_from_selection`` instead.
+    """
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "add_level_to_world",
+            "level_path": level_path,
+            "mode": mode,
+            "location": list(location or [0, 0, 0]),
+            "rotation": list(rotation or [0, 0, 0]),
+            "streaming_class": streaming_class,
+        }),
+        success_message=f"Added {level_path} to world.",
+        error_code="LEVEL_OPERATION_FAILED",
+        default_error="Failed to add level to world.",
+    )
+
+
+@mcp.tool()
+def list_level_instances() -> dict:
+    """Return every ``ALevelInstance`` actor in the current editor world."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "list_level_instances"}),
+        success_message="Listed level instances.",
+        error_code="LEVEL_OPERATION_FAILED",
+        default_error="Failed to list level instances.",
+    )
+
+
+@mcp.tool()
+def create_landscape(
+    location: list = None,
+    rotation: list = None,
+    scale: list = None,
+    size: list = None,
+    material_path: str = "",
+    actor_label: str = "MCP_Landscape",
+) -> dict:
+    """Spawn a Landscape actor at a given transform with an optional landscape material."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "create_landscape",
+            "location": list(location or [0, 0, 0]),
+            "rotation": list(rotation or [0, 0, 0]),
+            "scale": list(scale) if scale else None,
+            "size": list(size) if size else None,
+            "material_path": material_path,
+            "actor_label": actor_label,
+        }),
+        success_message="Spawned landscape.",
+        error_code="LANDSCAPE_OPERATION_FAILED",
+        default_error="Failed to create landscape.",
+    )
+
+
+@mcp.tool()
+def set_landscape_material(actor_name: str, material_path: str) -> dict:
+    """Assign ``material_path`` to the ``landscape_material`` slot on ``actor_name``."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_landscape_material",
+            "actor_name": actor_name,
+            "material_path": material_path,
+        }),
+        success_message=f"Set landscape material on {actor_name}.",
+        error_code="LANDSCAPE_OPERATION_FAILED",
+        default_error="Failed to set landscape material.",
+    )
+
+
+@mcp.tool()
+def capture_editor_viewport(
+    width: int = 1920,
+    height: int = 1080,
+    include_ui: bool = False,
+    filename: str = "",
+) -> dict:
+    """Capture the Unreal editor viewport (not the whole desktop) as a PNG."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "capture_editor_viewport",
+            "width": width,
+            "height": height,
+            "include_ui": include_ui,
+            "filename": filename,
+        }, timeout_seconds=60.0),
+        success_message="Captured editor viewport.",
+        error_code="VIEWPORT_CAPTURE_FAILED",
+        default_error="Failed to capture editor viewport.",
+    )
+
+
+@mcp.tool()
+def set_project_setting(settings_class: str, key: str, value, save_config: bool = True) -> dict:
+    """Set a property on a project-settings class CDO (e.g. ``/Script/Engine.RendererSettings``)."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_project_setting",
+            "settings_class": settings_class,
+            "key": key,
+            "value": value,
+            "save_config": save_config,
+        }),
+        success_message=f"Set {settings_class}.{key}.",
+        error_code="PROJECT_SETTING_FAILED",
+        default_error="Failed to set project setting.",
+    )
+
+
+@mcp.tool()
+def set_rendering_defaults(
+    auto_exposure: bool = None,
+    motion_blur: bool = None,
+    bloom: bool = None,
+    ambient_occlusion: bool = None,
+    lens_flares: bool = None,
+) -> dict:
+    """Toggle common rendering defaults (``/Script/Engine.RendererSettings``)."""
+    command = {"type": "set_rendering_defaults"}
+    for name, value in [
+        ("auto_exposure", auto_exposure),
+        ("motion_blur", motion_blur),
+        ("bloom", bloom),
+        ("ambient_occlusion", ambient_occlusion),
+        ("lens_flares", lens_flares),
+    ]:
+        if value is not None:
+            command[name] = value
+    return _forward_structured_socket_response(
+        send_to_unreal(command),
+        success_message="Rendering defaults applied.",
+        error_code="PROJECT_SETTING_FAILED",
+        default_error="Failed to apply rendering defaults.",
+    )
+
+
+@mcp.tool()
+def duplicate_actors(actor_names: list, offset: list = None) -> dict:
+    """Duplicate a set of actors with an optional world-space offset."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "duplicate_actors",
+            "actor_names": list(actor_names or []),
+            "offset": list(offset or [0, 0, 0]),
+        }),
+        success_message="Duplicated actors.",
+        error_code="ACTOR_OPERATION_FAILED",
+        default_error="Failed to duplicate actors.",
+    )
+
+
+@mcp.tool()
+def replace_static_mesh(actor_names: list, mesh_path: str) -> dict:
+    """Swap the static mesh asset on the given actors."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "replace_static_mesh",
+            "actor_names": list(actor_names or []),
+            "mesh_path": mesh_path,
+        }),
+        success_message="Replaced static mesh.",
+        error_code="ACTOR_OPERATION_FAILED",
+        default_error="Failed to replace static mesh.",
+    )
+
+
+@mcp.tool()
+def replace_material(actor_names: list, material_path: str, slot_index: int = 0) -> dict:
+    """Replace a material slot on the primary mesh component of each actor."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "replace_material",
+            "actor_names": list(actor_names or []),
+            "material_path": material_path,
+            "slot_index": slot_index,
+        }),
+        success_message="Replaced material.",
+        error_code="ACTOR_OPERATION_FAILED",
+        default_error="Failed to replace material.",
+    )
+
+
+@mcp.tool()
+def group_actors(actor_names: list, group_name: str) -> dict:
+    """Group actors under a World Outliner folder path."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "group_actors",
+            "actor_names": list(actor_names or []),
+            "group_name": group_name,
+        }),
+        success_message=f"Grouped actors under {group_name}.",
+        error_code="ACTOR_OPERATION_FAILED",
+        default_error="Failed to group actors.",
+    )
+
+
+@mcp.tool()
+def select_actors(query: str, match: str = "contains") -> dict:
+    """Select actors in the outliner whose label/name match ``query``.
+
+    ``match`` is one of ``contains`` (default), ``prefix``, or ``exact``.
+    """
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "select_actors",
+            "query": query,
+            "match": match,
+        }),
+        success_message=f"Selected actors matching {query!r}.",
+        error_code="ACTOR_OPERATION_FAILED",
+        default_error="Failed to select actors.",
+    )
+
+
 if __name__ == "__main__":
     import traceback
 
