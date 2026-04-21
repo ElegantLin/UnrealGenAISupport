@@ -1666,6 +1666,749 @@ def list_active_jobs() -> dict:
     )
 
 
+# Safe Mutation Runtime (P1)
+@mcp.tool()
+def preview_operation(operation: str, payload: dict = None) -> dict:
+    """Run the preview phase of a safe mutation transaction.
+
+    Args:
+        operation: Name of the operation to preview (e.g. ``set_property``,
+            ``add_component``, ``compile_blueprint``, or ``generic`` for
+            arbitrary asset edits backed by ``UGenAssetTransactionUtils``).
+        payload: Operation-specific arguments. Pass ``target_assets`` (list of
+            asset paths) and any ``changes`` you intend to apply.
+
+    Returns:
+        Structured envelope. The ``data`` block always contains
+        ``transaction_id``, which must be passed to ``apply_operation``.
+    """
+    command = {"type": "preview_operation", "operation": operation}
+    if payload is not None:
+        command["payload"] = payload
+    return _forward_structured_socket_response(
+        send_to_unreal(command),
+        success_message="Preview ready.",
+        error_code="PREVIEW_FAILED",
+        default_error="Failed to preview operation.",
+    )
+
+
+@mcp.tool()
+def apply_operation(transaction_id: str, payload: dict = None) -> dict:
+    """Apply a previously previewed mutation transaction.
+
+    Args:
+        transaction_id: The token returned by ``preview_operation``.
+        payload: Optional final overrides (kept aligned with the previewed
+            ``changes``). ``snapshot_token`` and ``target_assets`` are inherited
+            automatically when omitted.
+
+    Returns:
+        Structured envelope whose ``data`` block contains a mutation report
+        (``changed_assets``, ``compiled_assets``, ``saved_assets``,
+        ``warnings``, ``rollback_performed``, ``verification_checks``).
+    """
+    command = {"type": "apply_operation", "transaction_id": transaction_id}
+    if payload is not None:
+        command["payload"] = payload
+    return _forward_structured_socket_response(
+        send_to_unreal(command),
+        success_message="Operation applied.",
+        error_code="APPLY_FAILED",
+        default_error="Failed to apply operation.",
+    )
+
+
+@mcp.tool()
+def undo_last_mcp_operation() -> dict:
+    """Roll back the most recent MCP-originated mutation transaction."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "undo_last_mcp_operation"}),
+        success_message="Last MCP operation undone.",
+        error_code="UNDO_FAILED",
+        default_error="Failed to undo last MCP operation.",
+    )
+
+
+# Blueprint Inspection (P1.25)
+@mcp.tool()
+def get_graph_schema(blueprint_path: str) -> dict:
+    """Return all graphs (Ubergraph, Function, Macro, Animation, ...) for a Blueprint."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "get_graph_schema", "blueprint_path": blueprint_path}),
+        success_message="Graph schema loaded.",
+        error_code="GRAPH_SCHEMA_FAILED",
+        default_error="Failed to load graph schema.",
+    )
+
+
+@mcp.tool()
+def resolve_graph_by_path(blueprint_path: str, graph_path: str) -> dict:
+    """Resolve a graph by its hierarchical path (e.g. ``EventGraph/MyFunction``)."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "resolve_graph_by_path",
+                "blueprint_path": blueprint_path,
+                "graph_path": graph_path,
+            }
+        ),
+        success_message="Graph resolved.",
+        error_code="RESOLVE_GRAPH_FAILED",
+        default_error="Failed to resolve graph.",
+    )
+
+
+@mcp.tool()
+def get_graph_nodes(blueprint_path: str, graph_path: str) -> dict:
+    """List nodes within a specific graph."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "get_graph_nodes",
+                "blueprint_path": blueprint_path,
+                "graph_path": graph_path,
+            }
+        ),
+        success_message="Graph nodes loaded.",
+        error_code="GRAPH_NODES_FAILED",
+        default_error="Failed to load graph nodes.",
+    )
+
+
+@mcp.tool()
+def get_graph_pins(blueprint_path: str, graph_path: str, node_guid: str) -> dict:
+    """List pins of a node, including direction, category, and sub-category."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "get_graph_pins",
+                "blueprint_path": blueprint_path,
+                "graph_path": graph_path,
+                "node_guid": node_guid,
+            }
+        ),
+        success_message="Graph pins loaded.",
+        error_code="GRAPH_PINS_FAILED",
+        default_error="Failed to load graph pins.",
+    )
+
+
+@mcp.tool()
+def resolve_node_by_selector(blueprint_path: str, selector: str) -> dict:
+    """Resolve a node by selector (``GUID``, ``Name``, or ``Graph:Identifier``)."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "resolve_node_by_selector",
+                "blueprint_path": blueprint_path,
+                "selector": selector,
+            }
+        ),
+        success_message="Node resolved.",
+        error_code="NODE_RESOLVE_FAILED",
+        default_error="Failed to resolve node.",
+    )
+
+
+@mcp.tool()
+def get_pin_compatibility(
+    source_pin: dict,
+    target_pin: dict,
+    source_node: str = "",
+    target_node: str = "",
+) -> dict:
+    """Return whether two pins can be connected and, if not, an autocast hint.
+
+    Each pin descriptor must include ``name``, ``direction`` (``input`` /
+    ``output``), and ``category``. Optional fields: ``sub_category``,
+    ``container_type`` (``none`` / ``array`` / ``set`` / ``map``),
+    ``is_reference``.
+    """
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "get_pin_compatibility",
+                "source_pin": source_pin,
+                "target_pin": target_pin,
+                "source_node": source_node,
+                "target_node": target_node,
+            }
+        ),
+        success_message="Pin compatibility evaluated.",
+        error_code="PIN_INCOMPATIBLE",
+        default_error="Failed to evaluate pin compatibility.",
+    )
+
+
+@mcp.tool()
+def suggest_autocast_path(source_category: str, target_category: str) -> dict:
+    """Return the conversion node hint for casting between two pin categories."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "suggest_autocast_path",
+                "source_category": source_category,
+                "target_category": target_category,
+            }
+        ),
+        success_message="Autocast suggestion ready.",
+        error_code="AUTOCAST_UNAVAILABLE",
+        default_error="No autocast suggestion available.",
+    )
+
+
+@mcp.tool()
+def compile_blueprint_with_diagnostics(blueprint_path: str) -> dict:
+    """Compile a Blueprint and return structured warnings/errors instead of bool."""
+
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {"type": "compile_blueprint_with_diagnostics", "blueprint_path": blueprint_path}
+        ),
+        success_message="Blueprint compiled.",
+        error_code="BLUEPRINT_COMPILE_FAILED",
+        default_error="Failed to compile Blueprint.",
+    )
+
+
+# -----------------------------------------------------------------------------
+# Editor session restore (P1.5)
+# -----------------------------------------------------------------------------
+
+@mcp.tool()
+def capture_editor_session() -> dict:
+    """Snapshot the current editor state (open assets, primary focus, graph)."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "capture_editor_session"}),
+        success_message="Session captured.",
+        error_code="SESSION_CAPTURE_FAILED",
+        default_error="Unable to capture editor session.",
+    )
+
+
+@mcp.tool()
+def save_editor_session(snapshot: dict | None = None) -> dict:
+    """Persist the provided (or freshly captured) session to Saved/MCP/LastEditorSession.json."""
+    command = {"type": "save_editor_session"}
+    if snapshot is not None:
+        command["snapshot"] = snapshot
+    return _forward_structured_socket_response(
+        send_to_unreal(command),
+        success_message="Session saved.",
+        error_code="SESSION_SAVE_FAILED",
+        default_error="Unable to save editor session.",
+    )
+
+
+@mcp.tool()
+def restore_editor_session(policy: str = "assets_only", snapshot: dict | None = None) -> dict:
+    """Re-open the assets / graph / node focus captured in the last session snapshot.
+
+    ``policy`` is one of ``none``, ``assets_only`` (default), ``assets_and_tabs``.
+    """
+    command = {"type": "restore_editor_session", "policy": policy}
+    if snapshot is not None:
+        command["snapshot"] = snapshot
+    return _forward_structured_socket_response(
+        send_to_unreal(command),
+        success_message="Session restored.",
+        error_code="SESSION_RESTORE_FAILED",
+        default_error="Unable to restore editor session.",
+    )
+
+
+@mcp.tool()
+def open_asset(asset_path: str, primary: bool = False) -> dict:
+    """Open an asset in its default editor."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "open_asset", "asset_path": asset_path, "primary": primary}),
+        success_message="Asset opened.",
+        error_code="OPEN_ASSET_FAILED",
+        default_error="Unable to open asset.",
+    )
+
+
+@mcp.tool()
+def bring_asset_to_front(asset_path: str) -> dict:
+    """Bring the asset editor tab to the foreground."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "bring_asset_to_front", "asset_path": asset_path}),
+        success_message="Asset brought to front.",
+        error_code="FOCUS_ASSET_FAILED",
+        default_error="Unable to focus asset.",
+    )
+
+
+@mcp.tool()
+def focus_graph(asset_path: str, graph_path: str) -> dict:
+    """Switch the focused graph tab inside the Blueprint editor."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {"type": "focus_graph", "asset_path": asset_path, "graph_path": graph_path}
+        ),
+        success_message="Graph focused.",
+        error_code="FOCUS_GRAPH_FAILED",
+        default_error="Unable to focus graph.",
+    )
+
+
+@mcp.tool()
+def focus_node(asset_path: str, graph_path: str, node_guid: str) -> dict:
+    """Center the graph viewport on a specific node by GUID."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "focus_node",
+                "asset_path": asset_path,
+                "graph_path": graph_path,
+                "node_guid": node_guid,
+            }
+        ),
+        success_message="Node focused.",
+        error_code="FOCUS_NODE_FAILED",
+        default_error="Unable to focus node.",
+    )
+
+
+@mcp.tool()
+def select_actor(actor_label: str) -> dict:
+    """Select a level actor by label or path."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "select_actor", "actor_label": actor_label}),
+        success_message="Actor selected.",
+        error_code="SELECT_ACTOR_FAILED",
+        default_error="Unable to select actor.",
+    )
+
+
+# -----------------------------------------------------------------------------
+# Enhanced Input (P2)
+# -----------------------------------------------------------------------------
+
+@mcp.tool()
+def create_input_action(
+    name: str,
+    save_path: str = "/Game/Input",
+    value_type: str = "Digital",
+    description: str = "",
+) -> dict:
+    """Create a UInputAction asset.  ``value_type`` in {Digital, Axis1D, Axis2D, Axis3D}."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "create_input_action",
+                "name": name,
+                "save_path": save_path,
+                "value_type": value_type,
+                "description": description,
+            }
+        ),
+        success_message="InputAction created.",
+        error_code="CREATE_INPUT_ACTION_FAILED",
+        default_error="Unable to create InputAction.",
+    )
+
+
+@mcp.tool()
+def create_input_mapping_context(name: str, save_path: str = "/Game/Input") -> dict:
+    """Create a UInputMappingContext asset."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "create_input_mapping_context",
+                "name": name,
+                "save_path": save_path,
+            }
+        ),
+        success_message="InputMappingContext created.",
+        error_code="CREATE_INPUT_CONTEXT_FAILED",
+        default_error="Unable to create InputMappingContext.",
+    )
+
+
+@mcp.tool()
+def map_enhanced_input_action(
+    context_path: str,
+    action_path: str,
+    key: str,
+    triggers: list | None = None,
+    modifiers: list | None = None,
+) -> dict:
+    """Map ``key`` (with optional triggers / modifiers) to an InputAction in a context."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "map_enhanced_input_action",
+                "context_path": context_path,
+                "action_path": action_path,
+                "key": key,
+                "triggers": triggers or [],
+                "modifiers": modifiers or [],
+            }
+        ),
+        success_message="Input mapping added.",
+        error_code="INPUT_MAPPING_FAILED",
+        default_error="Unable to add input mapping.",
+    )
+
+
+@mcp.tool()
+def list_input_mappings(context_path: str) -> dict:
+    """Return the bindings inside an InputMappingContext."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "list_input_mappings", "context_path": context_path}),
+        success_message="Mappings listed.",
+        error_code="LIST_INPUT_MAPPINGS_FAILED",
+        default_error="Unable to list input mappings.",
+    )
+
+
+# -----------------------------------------------------------------------------
+# BlendSpace (P3)
+# -----------------------------------------------------------------------------
+
+@mcp.tool()
+def get_blend_space_info(blend_space_path: str) -> dict:
+    """Read axes / samples / additive settings of a BlendSpace asset."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {"type": "get_blend_space_info", "blend_space_path": blend_space_path}
+        ),
+        success_message="BlendSpace info read.",
+        error_code="BLEND_SPACE_READ_FAILED",
+        default_error="Unable to read BlendSpace.",
+    )
+
+
+@mcp.tool()
+def set_blend_space_axis(blend_space_path: str, axis_index: int, axis: dict) -> dict:
+    """Replace a single axis config.  ``axis`` keys: name, min_value, max_value, grid_divisions, kind."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "set_blend_space_axis",
+                "blend_space_path": blend_space_path,
+                "axis_index": axis_index,
+                "axis": axis,
+            }
+        ),
+        success_message="BlendSpace axis updated.",
+        error_code="BLEND_SPACE_WRITE_FAILED",
+        default_error="Unable to update BlendSpace axis.",
+    )
+
+
+@mcp.tool()
+def replace_blend_space_samples(blend_space_path: str, samples: list) -> dict:
+    """Replace the full sample set (each sample: animation_path, coordinates, rate_scale)."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "replace_blend_space_samples",
+                "blend_space_path": blend_space_path,
+                "samples": samples,
+            }
+        ),
+        success_message="BlendSpace samples replaced.",
+        error_code="BLEND_SPACE_WRITE_FAILED",
+        default_error="Unable to replace BlendSpace samples.",
+    )
+
+
+@mcp.tool()
+def set_blend_space_sample_animation(
+    blend_space_path: str,
+    sample_index: int,
+    animation_path: str,
+) -> dict:
+    """Swap the animation asset referenced by an existing BlendSpace sample."""
+    return _forward_structured_socket_response(
+        send_to_unreal(
+            {
+                "type": "set_blend_space_sample_animation",
+                "blend_space_path": blend_space_path,
+                "sample_index": sample_index,
+                "animation_path": animation_path,
+            }
+        ),
+        success_message="BlendSpace sample animation updated.",
+        error_code="BLEND_SPACE_WRITE_FAILED",
+        default_error="Unable to update BlendSpace sample animation.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# AnimBlueprint read (P4) ---------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_anim_blueprint_structure(anim_blueprint_path: str) -> dict:
+    """Return a deterministic snapshot of an AnimBlueprint (state machines, states, transitions, aliases)."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "get_anim_blueprint_structure", "anim_blueprint_path": anim_blueprint_path}),
+        success_message="AnimBlueprint structure retrieved.",
+        error_code="ANIM_BP_READ_FAILED",
+        default_error="Unable to read AnimBlueprint structure.",
+    )
+
+
+@mcp.tool()
+def get_graph_nodes(anim_blueprint_path: str, graph_path: str) -> dict:
+    """List nodes inside an AnimBlueprint graph path (e.g. ``AnimGraph/Locomotion``)."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "get_graph_nodes", "anim_blueprint_path": anim_blueprint_path, "graph_path": graph_path}),
+        success_message="Graph nodes retrieved.",
+        error_code="ANIM_BP_READ_FAILED",
+        default_error="Unable to read graph nodes.",
+    )
+
+
+@mcp.tool()
+def get_graph_pins(anim_blueprint_path: str, graph_path: str, node_id: str) -> dict:
+    """List pins of a specific node inside an AnimBlueprint graph."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "get_graph_pins",
+            "anim_blueprint_path": anim_blueprint_path,
+            "graph_path": graph_path,
+            "node_id": node_id,
+        }),
+        success_message="Graph pins retrieved.",
+        error_code="ANIM_BP_READ_FAILED",
+        default_error="Unable to read graph pins.",
+    )
+
+
+@mcp.tool()
+def resolve_graph_by_path(anim_blueprint_path: str, graph_path: str) -> dict:
+    """Resolve an AnimBlueprint graph path to stable selectors."""
+    return _forward_structured_socket_response(
+        send_to_unreal({"type": "resolve_graph_by_path", "anim_blueprint_path": anim_blueprint_path, "graph_path": graph_path}),
+        success_message="Graph resolved.",
+        error_code="ANIM_BP_READ_FAILED",
+        default_error="Unable to resolve graph path.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# AnimBlueprint write (P5) --------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def create_state_machine(anim_blueprint_path: str, state_machine: str, entry_state: str = "") -> dict:
+    """Create a new state machine inside an AnimBlueprint's AnimGraph."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "create_state_machine",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "entry_state": entry_state,
+        }),
+        success_message="State machine created.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to create state machine.",
+    )
+
+
+@mcp.tool()
+def create_state(anim_blueprint_path: str, state_machine: str, state: str, kind: str = "State") -> dict:
+    """Create a new state inside a state machine."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "create_state",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "state": state,
+            "kind": kind,
+        }),
+        success_message="State created.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to create state.",
+    )
+
+
+@mcp.tool()
+def create_transition(anim_blueprint_path: str, state_machine: str, from_state: str, to_state: str, rule: dict = None) -> dict:
+    """Create a transition between two states. ``rule`` follows the transition rule schema."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "create_transition",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "from_state": from_state,
+            "to_state": to_state,
+            "rule": rule or {"kind": "always"},
+        }),
+        success_message="Transition created.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to create transition.",
+    )
+
+
+@mcp.tool()
+def set_transition_rule(anim_blueprint_path: str, state_machine: str, from_state: str, to_state: str, rule: dict) -> dict:
+    """Set the rule on an existing transition."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_transition_rule",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "from_state": from_state,
+            "to_state": to_state,
+            "rule": rule,
+        }),
+        success_message="Transition rule updated.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to update transition rule.",
+    )
+
+
+@mcp.tool()
+def create_state_alias(anim_blueprint_path: str, state_machine: str, alias_name: str, aliased_states: list) -> dict:
+    """Create a state alias that forwards to the listed states."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "create_state_alias",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "state": alias_name,
+            "aliased_states": list(aliased_states or []),
+        }),
+        success_message="State alias created.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to create state alias.",
+    )
+
+
+@mcp.tool()
+def set_alias_targets(anim_blueprint_path: str, state_machine: str, alias_name: str, aliased_states: list) -> dict:
+    """Replace the target state list of an existing alias."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_alias_targets",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "state": alias_name,
+            "aliased_states": list(aliased_states or []),
+        }),
+        success_message="Alias targets updated.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to update alias targets.",
+    )
+
+
+@mcp.tool()
+def set_state_sequence_asset(
+    anim_blueprint_path: str,
+    state_machine: str,
+    state: str,
+    asset_path: str,
+    play_rate: float = 1.0,
+    play_mode: str = "Loop",
+) -> dict:
+    """Bind a state's inner pose to an AnimSequence asset."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_state_sequence_asset",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "state": state,
+            "asset_path": asset_path,
+            "play_rate": play_rate,
+            "play_mode": play_mode,
+        }),
+        success_message="State sequence asset set.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to set state sequence asset.",
+    )
+
+
+@mcp.tool()
+def set_state_blend_space_asset(
+    anim_blueprint_path: str,
+    state_machine: str,
+    state: str,
+    asset_path: str,
+    play_rate: float = 1.0,
+    play_mode: str = "Loop",
+) -> dict:
+    """Bind a state's inner pose to a BlendSpace asset."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_state_blend_space_asset",
+            "anim_blueprint_path": anim_blueprint_path,
+            "state_machine": state_machine,
+            "state": state,
+            "asset_path": asset_path,
+            "play_rate": play_rate,
+            "play_mode": play_mode,
+        }),
+        success_message="State BlendSpace asset set.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to set state BlendSpace asset.",
+    )
+
+
+@mcp.tool()
+def set_cached_pose_node(anim_blueprint_path: str, pose_name: str, source_node: str = "") -> dict:
+    """Create or update a Cached Pose node feeding from ``source_node``."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_cached_pose_node",
+            "anim_blueprint_path": anim_blueprint_path,
+            "pose_name": pose_name,
+            "source_node": source_node,
+        }),
+        success_message="Cached pose node updated.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to update cached pose node.",
+    )
+
+
+@mcp.tool()
+def set_default_slot_chain(anim_blueprint_path: str, slot_name: str = "DefaultSlot", source_node: str = "") -> dict:
+    """Wire a Default Slot node into the AnimGraph output."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_default_slot_chain",
+            "anim_blueprint_path": anim_blueprint_path,
+            "slot_name": slot_name,
+            "source_node": source_node,
+        }),
+        success_message="Default slot chain updated.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to update default slot chain.",
+    )
+
+
+@mcp.tool()
+def set_apply_additive_chain(anim_blueprint_path: str, base_node: str, additive_node: str, alpha: float = 1.0) -> dict:
+    """Insert an Apply Additive node combining ``base_node`` and ``additive_node``."""
+    return _forward_structured_socket_response(
+        send_to_unreal({
+            "type": "set_apply_additive_chain",
+            "anim_blueprint_path": anim_blueprint_path,
+            "base_node": base_node,
+            "additive_node": additive_node,
+            "alpha": alpha,
+        }),
+        success_message="Apply additive chain updated.",
+        error_code="ANIM_BP_WRITE_FAILED",
+        default_error="Unable to update apply additive chain.",
+    )
+
+
 # Scene Control
 @mcp.tool()
 def get_all_scene_objects() -> str:

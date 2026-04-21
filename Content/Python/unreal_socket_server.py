@@ -8,15 +8,34 @@ from typing import Any, Dict, List, Optional
 
 import unreal
 
-from handlers import actor_commands, basic_commands, blueprint_commands, fab_commands, plugin_commands, preflight_commands, python_commands, ui_commands
+from handlers import (
+    actor_commands,
+    anim_blueprint_commands,
+    animation_commands,
+    basic_commands,
+    blueprint_commands,
+    blueprint_inspect_commands,
+    fab_commands,
+    input_commands,
+    plugin_commands,
+    preflight_commands,
+    python_commands,
+    session_commands,
+    transaction_commands,
+    ui_commands,
+)
 from utils import logging as log
 
 try:
+    from utils.blueprint_graph import collect_supported_graph_types
     from utils.job_state import JobRecord, mark_cancelled, mark_completed, mark_failed, mark_running, to_dict
     from utils.mcp_response import API_VERSION
+    from utils.safety import UNSAFE_COMMANDS
 except ImportError:
+    from Content.Python.utils.blueprint_graph import collect_supported_graph_types
     from Content.Python.utils.job_state import JobRecord, mark_cancelled, mark_completed, mark_failed, mark_running, to_dict
     from Content.Python.utils.mcp_response import API_VERSION
+    from Content.Python.utils.safety import UNSAFE_COMMANDS
 
 
 command_queue: List[str] = []
@@ -284,6 +303,63 @@ class CommandDispatcher:
             "set_plugin_enabled": plugin_commands.handle_set_plugin_enabled,
             "request_editor_restart": plugin_commands.handle_request_editor_restart,
 
+            # Safe mutation runtime (P1)
+            "preview_operation": transaction_commands.handle_preview_operation,
+            "apply_operation": transaction_commands.handle_apply_operation,
+            "undo_last_mcp_operation": transaction_commands.handle_undo_last_mcp_operation,
+
+            # Blueprint inspection (P1.25)
+            "get_graph_schema": blueprint_inspect_commands.handle_get_graph_schema,
+            "resolve_graph_by_path": blueprint_inspect_commands.handle_resolve_graph_by_path,
+            "get_graph_nodes": blueprint_inspect_commands.handle_get_graph_nodes,
+            "get_graph_pins": blueprint_inspect_commands.handle_get_graph_pins,
+            "resolve_node_by_selector": blueprint_inspect_commands.handle_resolve_node_by_selector,
+            "get_pin_compatibility": blueprint_inspect_commands.handle_get_pin_compatibility,
+            "suggest_autocast_path": blueprint_inspect_commands.handle_suggest_autocast_path,
+            "compile_blueprint_with_diagnostics": blueprint_inspect_commands.handle_compile_blueprint_with_diagnostics,
+
+            # Editor session restore (P1.5)
+            "capture_editor_session": session_commands.handle_capture_editor_session,
+            "restore_editor_session": session_commands.handle_restore_editor_session,
+            "save_editor_session": session_commands.handle_save_editor_session,
+            "open_asset": session_commands.handle_open_asset,
+            "bring_asset_to_front": session_commands.handle_bring_asset_to_front,
+            "focus_graph": session_commands.handle_focus_graph,
+            "focus_node": session_commands.handle_focus_node,
+            "select_actor": session_commands.handle_select_actor,
+
+            # Enhanced Input (P2)
+            "create_input_action": input_commands.handle_create_input_action,
+            "create_input_mapping_context": input_commands.handle_create_input_mapping_context,
+            "map_enhanced_input_action": input_commands.handle_map_enhanced_input_action,
+            "list_input_mappings": input_commands.handle_list_input_mappings,
+            "legacy_input_binding_warning": input_commands.handle_legacy_input_binding_warning,
+
+            # BlendSpace (P3)
+            "get_blend_space_info": animation_commands.handle_get_blend_space_info,
+            "set_blend_space_axis": animation_commands.handle_set_blend_space_axis,
+            "replace_blend_space_samples": animation_commands.handle_replace_blend_space_samples,
+            "set_blend_space_sample_animation": animation_commands.handle_set_blend_space_sample_animation,
+
+            # AnimBlueprint read (P4)
+            "get_anim_blueprint_structure": anim_blueprint_commands.handle_get_anim_blueprint_structure,
+            "get_graph_nodes": anim_blueprint_commands.handle_get_graph_nodes,
+            "get_graph_pins": anim_blueprint_commands.handle_get_graph_pins,
+            "resolve_graph_by_path": anim_blueprint_commands.handle_resolve_graph_by_path,
+
+            # AnimBlueprint write (P5)
+            "create_state_machine": anim_blueprint_commands.handle_create_state_machine,
+            "create_state": anim_blueprint_commands.handle_create_state,
+            "create_transition": anim_blueprint_commands.handle_create_transition,
+            "set_transition_rule": anim_blueprint_commands.handle_set_transition_rule,
+            "create_state_alias": anim_blueprint_commands.handle_create_state_alias,
+            "set_alias_targets": anim_blueprint_commands.handle_set_alias_targets,
+            "set_state_sequence_asset": anim_blueprint_commands.handle_set_state_sequence_asset,
+            "set_state_blend_space_asset": anim_blueprint_commands.handle_set_state_blend_space_asset,
+            "set_cached_pose_node": anim_blueprint_commands.handle_set_cached_pose_node,
+            "set_default_slot_chain": anim_blueprint_commands.handle_set_default_slot_chain,
+            "set_apply_additive_chain": anim_blueprint_commands.handle_set_apply_additive_chain,
+
             # Actor / component commands
             "edit_component_property": actor_commands.handle_edit_component_property,
             "add_component_with_events": actor_commands.handle_add_component_with_events,
@@ -355,16 +431,27 @@ class CommandDispatcher:
                 "Material",
                 "ProjectFolder",
                 "UserWidget",
+                "InputAction",
+                "InputMappingContext",
+                "BlendSpace",
+                "BlendSpace1D",
             ],
-            "supported_graph_types": [
-                "EventGraph",
-                "FunctionGraph",
+            "supported_graph_types": collect_supported_graph_types(),
+            "unsafe_commands": list(UNSAFE_COMMANDS),
+            "supported_restore_policies": ["none", "assets_only", "assets_and_tabs"],
+            "supported_input_value_types": ["Digital", "Axis1D", "Axis2D", "Axis3D"],
+            "supported_blend_space_axis_kinds": ["Speed", "Direction", "Angle", "Custom"],
+            "supported_anim_blueprint_features": [
+                "state_machine",
+                "state",
+                "transition",
+                "state_alias",
+                "cached_pose",
+                "default_slot",
+                "apply_additive",
             ],
-            "unsafe_commands": [
-                "execute_python",
-                "anim_blueprint_graph_mutation",
-                "restart_editor(force=True)",
-            ],
+            "supported_transition_rule_kinds": ["always", "bool_property", "expression"],
+            "supported_anim_play_modes": ["Loop", "Once", "Freeze"],
             "api_version": API_VERSION,
             "editor_context": editor_context,
             "warnings": warnings,
@@ -615,8 +702,10 @@ def initialize_server():
     log.log_info("Available commands:")
     log.log_info("  - Core: handshake, get_capabilities, get_editor_context, preflight_project")
     log.log_info("  - Jobs: get_job_status, cancel_job, list_active_jobs")
-    log.log_info("  - Basic: spawn, create_material, modify_object, take_screenshot")
+    log.log_info("  - Mutation: preview_operation, apply_operation, undo_last_mcp_operation")
     log.log_info("  - Blueprint: create_blueprint, add_component, add_variable, add_function, add_node, connect_nodes, compile_blueprint, spawn_blueprint, add_nodes_bulk, connect_nodes_bulk")
+    log.log_info("  - Blueprint Inspection: get_graph_schema, resolve_graph_by_path, get_graph_nodes, get_graph_pins, resolve_node_by_selector, get_pin_compatibility, suggest_autocast_path, compile_blueprint_with_diagnostics")
+    log.log_info("  - Basic: spawn, create_material, modify_object, take_screenshot")
 
 
 initialize_server()

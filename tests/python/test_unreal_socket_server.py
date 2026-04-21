@@ -76,6 +76,61 @@ def _load_unreal_socket_server(monkeypatch):
             "handle_start_fab_add_to_project",
             "handle_get_fab_operation_status",
         ],
+        "transaction_commands": [
+            "handle_preview_operation",
+            "handle_apply_operation",
+            "handle_undo_last_mcp_operation",
+        ],
+        "blueprint_inspect_commands": [
+            "handle_get_graph_schema",
+            "handle_resolve_graph_by_path",
+            "handle_get_graph_nodes",
+            "handle_get_graph_pins",
+            "handle_resolve_node_by_selector",
+            "handle_get_pin_compatibility",
+            "handle_suggest_autocast_path",
+            "handle_compile_blueprint_with_diagnostics",
+        ],
+        "session_commands": [
+            "handle_capture_editor_session",
+            "handle_restore_editor_session",
+            "handle_save_editor_session",
+            "handle_open_asset",
+            "handle_bring_asset_to_front",
+            "handle_focus_graph",
+            "handle_focus_node",
+            "handle_select_actor",
+        ],
+        "input_commands": [
+            "handle_create_input_action",
+            "handle_create_input_mapping_context",
+            "handle_map_enhanced_input_action",
+            "handle_list_input_mappings",
+            "handle_legacy_input_binding_warning",
+        ],
+        "animation_commands": [
+            "handle_get_blend_space_info",
+            "handle_set_blend_space_axis",
+            "handle_replace_blend_space_samples",
+            "handle_set_blend_space_sample_animation",
+        ],
+        "anim_blueprint_commands": [
+            "handle_get_anim_blueprint_structure",
+            "handle_get_graph_nodes",
+            "handle_get_graph_pins",
+            "handle_resolve_graph_by_path",
+            "handle_create_state_machine",
+            "handle_create_state",
+            "handle_create_transition",
+            "handle_set_transition_rule",
+            "handle_create_state_alias",
+            "handle_set_alias_targets",
+            "handle_set_state_sequence_asset",
+            "handle_set_state_blend_space_asset",
+            "handle_set_cached_pose_node",
+            "handle_set_default_slot_chain",
+            "handle_set_apply_additive_chain",
+        ],
     }
 
     handlers = ModuleType("handlers")
@@ -87,8 +142,10 @@ def _load_unreal_socket_server(monkeypatch):
         setattr(handlers, module_name, module)
         monkeypatch.setitem(sys.modules, f"handlers.{module_name}", module)
 
+    from Content.Python.utils import blueprint_graph as actual_blueprint_graph
     from Content.Python.utils import job_state as actual_job_state
     from Content.Python.utils import mcp_response as actual_mcp_response
+    from Content.Python.utils import safety as actual_safety
 
     utils = ModuleType("utils")
     logging_module = ModuleType("utils.logging")
@@ -101,11 +158,15 @@ def _load_unreal_socket_server(monkeypatch):
     setattr(utils, "logging", logging_module)
     setattr(utils, "job_state", actual_job_state)
     setattr(utils, "mcp_response", actual_mcp_response)
+    setattr(utils, "safety", actual_safety)
+    setattr(utils, "blueprint_graph", actual_blueprint_graph)
 
     monkeypatch.setitem(sys.modules, "utils", utils)
     monkeypatch.setitem(sys.modules, "utils.logging", logging_module)
     monkeypatch.setitem(sys.modules, "utils.job_state", actual_job_state)
     monkeypatch.setitem(sys.modules, "utils.mcp_response", actual_mcp_response)
+    monkeypatch.setitem(sys.modules, "utils.safety", actual_safety)
+    monkeypatch.setitem(sys.modules, "utils.blueprint_graph", actual_blueprint_graph)
 
     return importlib.import_module("Content.Python.unreal_socket_server")
 
