@@ -37,6 +37,32 @@ class FakeActor:
         return self._world_asset
 
 
+class FakeActorEditorPropertyOnly:
+    def __init__(self, label=""):
+        self._label = label
+        self.props = {}
+
+    def get_actor_label(self):
+        return self._label
+
+    def set_actor_label(self, label):
+        self._label = label
+
+    def set_editor_property(self, key, value):
+        self.props[key] = value
+
+
+class FakeActorWithoutWorldAssetSetter:
+    def __init__(self, label=""):
+        self._label = label
+
+    def get_actor_label(self):
+        return self._label
+
+    def set_actor_label(self, label):
+        self._label = label
+
+
 class FakeWorldAsset:
     def __init__(self, path):
         self._path = path
@@ -323,8 +349,47 @@ def test_spawn_level_instance_success(monkeypatch):
         {"level_asset_path": "/Game/Maps/Prefab", "actor_label": "HousePrefab"}
     )
     assert resp["success"] is True
-    assert spawned._world_asset is asset or spawned.props.get("world_asset") is asset
+    assert spawned._world_asset is asset
+    assert "world_asset" not in spawned.props
     assert resp["data"]["level_asset_path"] == "/Game/Maps/Prefab"
+
+
+def test_spawn_level_instance_uses_editor_property_fallback(monkeypatch):
+    asset = FakeWorldAsset("/Game/Maps/Prefab")
+    spawned = FakeActorEditorPropertyOnly(label="LI_Prefab")
+    unreal_mod = _make_unreal(
+        assets=["/Game/Maps/Prefab"],
+        loaded={"/Game/Maps/Prefab": asset},
+        spawn_returns=spawned,
+    )
+    monkeypatch.setattr(level_commands, "_get_unreal_module", lambda: unreal_mod)
+
+    resp = level_commands.handle_spawn_level_instance(
+        {"level_asset_path": "/Game/Maps/Prefab"}
+    )
+
+    assert resp["success"] is True
+    assert spawned.props["world_asset"] is asset
+    assert resp["data"]["level_asset_path"] == "/Game/Maps/Prefab"
+
+
+def test_spawn_level_instance_reports_missing_world_asset_setter(monkeypatch):
+    asset = FakeWorldAsset("/Game/Maps/Prefab")
+    spawned = FakeActorWithoutWorldAssetSetter(label="LI_Prefab")
+    unreal_mod = _make_unreal(
+        assets=["/Game/Maps/Prefab"],
+        loaded={"/Game/Maps/Prefab": asset},
+        spawn_returns=spawned,
+    )
+    monkeypatch.setattr(level_commands, "_get_unreal_module", lambda: unreal_mod)
+
+    resp = level_commands.handle_spawn_level_instance(
+        {"level_asset_path": "/Game/Maps/Prefab"}
+    )
+
+    assert resp["success"] is False
+    assert resp["error_code"] == "LEVEL_OPERATION_FAILED"
+    assert "world-asset setter" in resp["message"]
 
 
 # ---------------------------------------------------------------------------

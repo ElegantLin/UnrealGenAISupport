@@ -429,16 +429,17 @@ def handle_spawn_level_instance(command: Dict[str, Any]) -> Dict[str, Any]:
 
     # Bind the world asset and load it (API surface varies by UE version).
     try:
-        setter = getattr(actor, "set_world_asset", None) or getattr(actor, "set_editor_property", None)
-        if setter is None:
+        set_world_asset = getattr(actor, "set_world_asset", None)
+        set_editor_property = getattr(actor, "set_editor_property", None)
+        if callable(set_world_asset):
+            set_world_asset(loaded_asset)
+        elif callable(set_editor_property):
+            set_editor_property("world_asset", loaded_asset)
+        else:
             return err(
                 error_code="LEVEL_OPERATION_FAILED",
                 message="Spawned LevelInstance actor exposes no world-asset setter.",
             )
-        if setter is getattr(actor, "set_editor_property", None):
-            setter("world_asset", loaded_asset)
-        else:
-            setter(loaded_asset)
     except Exception as exc:  # pragma: no cover
         return err(error_code="LEVEL_OPERATION_FAILED", message=str(exc))
 
