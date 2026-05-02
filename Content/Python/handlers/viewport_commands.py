@@ -10,6 +10,7 @@ contents as a base64 string.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 from typing import Any, Dict, Optional
@@ -37,9 +38,22 @@ def _project_saved_dir(unreal_mod) -> str:
     if paths is None:
         return ""
     try:
-        return str(paths.project_saved_dir())
+        return _absolute_unreal_path(unreal_mod, str(paths.project_saved_dir()))
     except Exception:
         return ""
+
+
+def _absolute_unreal_path(unreal_mod, path: str) -> str:
+    if not path:
+        return ""
+    paths = getattr(unreal_mod, "Paths", None)
+    convert = getattr(paths, "convert_relative_path_to_full", None) if paths is not None else None
+    if callable(convert):
+        try:
+            path = str(convert(path))
+        except Exception:
+            pass
+    return os.path.abspath(path)
 
 
 def _screenshot_dir(unreal_mod) -> str:
@@ -52,7 +66,7 @@ def _screenshot_dir(unreal_mod) -> str:
                 if candidate:
                     if getter == "project_saved_dir":
                         candidate = os.path.join(candidate, "Screenshots")
-                    return candidate
+                    return _absolute_unreal_path(unreal_mod, candidate)
             except Exception:
                 continue
     return ""
@@ -69,6 +83,38 @@ def _wait_for_file(path: str, timeout: float = 10.0, poll: float = 0.25) -> bool
                 pass
         time.sleep(poll)
     return False
+
+
+def _call_cpp_viewport_capture(unreal_mod, out_path: str, width: Any, height: Any) -> tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+    session_utils = getattr(unreal_mod, "GenEditorSessionUtils", None)
+    method = getattr(session_utils, "capture_active_viewport_png", None) if session_utils is not None else None
+    if not callable(method):
+        return False, None, None
+
+    try:
+        w = int(width) if width else 0
+        h = int(height) if height else 0
+    except (TypeError, ValueError):
+        w = h = 0
+
+    try:
+        raw = method(out_path, w, h)
+    except TypeError:
+        try:
+            raw = method(out_path)
+        except Exception as exc:  # pragma: no cover
+            return False, None, str(exc)
+    except Exception as exc:  # pragma: no cover
+        return False, None, str(exc)
+
+    try:
+        payload = json.loads(raw if isinstance(raw, str) else str(raw or "{}"))
+    except json.JSONDecodeError:
+        return False, {"raw": str(raw)}, "Viewport capture returned invalid JSON."
+
+    if payload.get("success"):
+        return True, payload, None
+    return False, payload, payload.get("error") or "C++ viewport capture failed."
 
 
 def handle_capture_editor_viewport(command: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,18 +159,30 @@ def handle_capture_editor_viewport(command: Dict[str, Any]) -> Dict[str, Any]:
 
     took_shot = False
     error_hint: Optional[str] = None
+    capture_payload: Dict[str, Any] = {}
+    capture_method = ""
 
-    if automation is not None and hasattr(automation, "take_high_res_screenshot"):
+    took_shot, cpp_payload, cpp_error = _call_cpp_viewport_capture(unreal_mod, out_path, width, height)
+    if cpp_payload:
+        capture_payload = cpp_payload
+    if took_shot:
+        capture_method = capture_payload.get("capture_method") or "active_viewport_read_pixels"
+    if cpp_error:
+        error_hint = cpp_error
+
+    if not took_shot and automation is not None and hasattr(automation, "take_high_res_screenshot"):
         try:
             w = int(width) if width else 1920
             h = int(height) if height else 1080
             # Signature: take_high_res_screenshot(res_x, res_y, filename, ...)
             automation.take_high_res_screenshot(w, h, out_path, None, False, False, None, include_ui)
             took_shot = True
+            capture_method = "automation"
         except TypeError:
             try:
                 automation.take_high_res_screenshot(w, h, out_path)
                 took_shot = True
+                capture_method = "automation"
             except Exception as exc:  # pragma: no cover
                 error_hint = str(exc)
         except Exception as exc:  # pragma: no cover
@@ -137,6 +195,7 @@ def handle_capture_editor_viewport(command: Dict[str, Any]) -> Dict[str, Any]:
         try:
             console.execute_console_command(None, cmd)
             took_shot = True
+            capture_method = "console"
         except Exception as exc:  # pragma: no cover
             error_hint = str(exc)
 
@@ -166,5 +225,8 @@ def handle_capture_editor_viewport(command: Dict[str, Any]) -> Dict[str, Any]:
             "image_base64": encoded,
             "format": "png",
             "include_ui": include_ui,
+            "capture_method": capture_method,
+            "width": capture_payload.get("width"),
+            "height": capture_payload.get("height"),
         },
     )

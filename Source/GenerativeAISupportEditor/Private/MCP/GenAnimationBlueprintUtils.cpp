@@ -28,6 +28,7 @@
 #include "AnimationStateMachineSchema.h"
 #include "AnimationStateGraph.h"
 #include "AnimationTransitionGraph.h"
+#include "AnimGraphNode_StateMachine.h"
 #include "AnimGraphNode_StateMachineBase.h"
 #include "AnimGraphNode_SequencePlayer.h"
 #include "AnimGraphNode_BlendSpacePlayer.h"
@@ -369,12 +370,33 @@ FString UGenAnimationBlueprintUtils::CreateStateMachine(const FString& AnimBluep
 	}
 	if (!AnimGraph) return GenAnimBP::MakeError(TEXT("AnimGraph not found"), TEXT("GRAPH_NOT_FOUND"));
 
-	UAnimationStateMachineGraph* SMGraph = NewObject<UAnimationStateMachineGraph>(
-		AnimBP, UAnimationStateMachineGraph::StaticClass(), *SMName, RF_Transactional);
-	SMGraph->Schema = UAnimationStateMachineSchema::StaticClass();
-	const UEdGraphSchema* Schema = SMGraph->GetSchema();
-	if (Schema) Schema->CreateDefaultNodesForGraph(*SMGraph);
-	AnimBP->FunctionGraphs.Add(SMGraph);
+	if (GenAnimBP::FindStateMachineNode(AnimBP, SMName))
+	{
+		return GenAnimBP::MakeError(
+			FString::Printf(TEXT("State machine already exists: %s"), *SMName),
+			TEXT("INVALID_PARAMETERS"));
+	}
+
+	AnimGraph->Modify();
+	UAnimGraphNode_StateMachine* SMNode = NewObject<UAnimGraphNode_StateMachine>(
+		AnimGraph, UAnimGraphNode_StateMachine::StaticClass(), NAME_None, RF_Transactional);
+	if (!SMNode)
+	{
+		return GenAnimBP::MakeError(TEXT("Failed to create state machine node"));
+	}
+
+	AnimGraph->AddNode(SMNode, true, false);
+	SMNode->CreateNewGuid();
+	SMNode->PostPlacedNewNode();
+	SMNode->AllocateDefaultPins();
+	SMNode->NodePosX = 0;
+	SMNode->NodePosY = 0;
+
+	if (!SMNode->EditorStateMachineGraph)
+	{
+		return GenAnimBP::MakeError(TEXT("Failed to create state machine graph"));
+	}
+	FBlueprintEditorUtils::RenameGraph(SMNode->EditorStateMachineGraph, SMName);
 
 	bool bCompiled = false, bSaved = false;
 	GenAnimBP::CompileAndSave(AnimBP, bCompiled, bSaved);
@@ -383,6 +405,7 @@ FString UGenAnimationBlueprintUtils::CreateStateMachine(const FString& AnimBluep
 	Out->SetBoolField(TEXT("compiled"), bCompiled);
 	Out->SetBoolField(TEXT("saved"), bSaved);
 	Out->SetStringField(TEXT("state_machine"), SMName);
+	Out->SetStringField(TEXT("graph_path"), SMNode->EditorStateMachineGraph->GetPathName());
 	return GenAnimBP::MakeOk(Out);
 }
 
@@ -404,12 +427,16 @@ FString UGenAnimationBlueprintUtils::CreateState(const FString& AnimBlueprintPat
 
 	UAnimStateNode* NewState = NewObject<UAnimStateNode>(
 		SM->EditorStateMachineGraph, UAnimStateNode::StaticClass(), NAME_None, RF_Transactional);
-	NewState->CreateNewGuid();
-	NewState->SetStateName(FName(*StateName));
 	NewState->NodePosX = 100;
 	NewState->NodePosY = 100;
 	SM->EditorStateMachineGraph->AddNode(NewState, true, false);
+	NewState->CreateNewGuid();
+	NewState->PostPlacedNewNode();
 	NewState->AllocateDefaultPins();
+	if (NewState->BoundGraph)
+	{
+		FBlueprintEditorUtils::RenameGraph(NewState->BoundGraph, StateName);
+	}
 
 	bool bCompiled = false, bSaved = false;
 	GenAnimBP::CompileAndSave(AnimBP, bCompiled, bSaved);
@@ -542,10 +569,11 @@ FString UGenAnimationBlueprintUtils::CreateStateAlias(const FString& AnimBluepri
 
 	UAnimStateAliasNode* Alias = NewObject<UAnimStateAliasNode>(
 		SM->EditorStateMachineGraph, UAnimStateAliasNode::StaticClass(), NAME_None, RF_Transactional);
-	Alias->CreateNewGuid();
-	Alias->SetStateName(FName(*AliasName));
 	SM->EditorStateMachineGraph->AddNode(Alias, true, false);
+	Alias->CreateNewGuid();
+	Alias->PostPlacedNewNode();
 	Alias->AllocateDefaultPins();
+	Alias->OnRenameNode(AliasName);
 
 	bool bCompiled = false, bSaved = false;
 	GenAnimBP::CompileAndSave(AnimBP, bCompiled, bSaved);
@@ -583,7 +611,7 @@ FString UGenAnimationBlueprintUtils::SetAliasTargets(const FString& AnimBlueprin
 	}
 	if (!Alias) return GenAnimBP::MakeError(TEXT("Alias not found"), TEXT("ANIM_BP_STATE_NOT_FOUND"));
 
-	Alias->StateAliasMap.Empty();
+	Alias->GetAliasedStates().Empty();
 	if (Targets)
 	{
 		for (const TSharedPtr<FJsonValue>& Value : *Targets)
@@ -592,7 +620,7 @@ FString UGenAnimationBlueprintUtils::SetAliasTargets(const FString& AnimBlueprin
 			if (Value.IsValid() && Value->TryGetString(Name))
 			{
 				UAnimStateNodeBase* Target = GenAnimBP::FindStateInMachine(SM, Name);
-				if (Target) Alias->StateAliasMap.Add(Target, true);
+				if (Target) Alias->GetAliasedStates().Add(Target);
 			}
 		}
 	}

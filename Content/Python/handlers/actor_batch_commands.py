@@ -172,7 +172,7 @@ def handle_duplicate_actors(command: Dict[str, Any]) -> Dict[str, Any]:
     try:
         dupes = []
         if callable(batch):
-            dupes = list(batch(actors, offset_vec) or [])
+            dupes = list(batch(actors, None, offset_vec) or [])
         else:
             single = getattr(subsystem, "duplicate_actor", None)
             if not callable(single):
@@ -182,7 +182,7 @@ def handle_duplicate_actors(command: Dict[str, Any]) -> Dict[str, Any]:
                 )
             for actor in actors:
                 try:
-                    dupe = single(actor, offset_vec, None)
+                    dupe = single(actor, None, offset_vec)
                 except TypeError:
                     dupe = single(actor, offset_vec)
                 if dupe is not None:

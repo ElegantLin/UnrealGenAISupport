@@ -51,6 +51,29 @@ def _load_material(unreal_mod, path: str):
         return None
 
 
+def _actor_class_name(actor) -> str:
+    getter = getattr(actor, "get_class", None)
+    if callable(getter):
+        try:
+            cls = getter()
+            name_getter = getattr(cls, "get_name", None)
+            if callable(name_getter):
+                return str(name_getter())
+            return str(cls or "")
+        except Exception:
+            pass
+    return type(actor).__name__
+
+
+def _destroy_actor(actor) -> None:
+    destroy = getattr(actor, "destroy_actor", None)
+    if callable(destroy):
+        try:
+            destroy()
+        except Exception:
+            pass
+
+
 def handle_create_landscape(command: Dict[str, Any]) -> Dict[str, Any]:
     """Spawn a landscape actor at a given transform with an optional material.
 
@@ -116,6 +139,19 @@ def handle_create_landscape(command: Dict[str, Any]) -> Dict[str, Any]:
         return err(
             error_code="LANDSCAPE_OPERATION_FAILED",
             message="Failed to spawn Landscape actor in the current world.",
+        )
+
+    actor_class_name = _actor_class_name(actor)
+    if actor_class_name == "LandscapePlaceholder":
+        _destroy_actor(actor)
+        return err(
+            error_code="LANDSCAPE_UNAVAILABLE",
+            message=(
+                "This editor build spawned LandscapePlaceholder instead of a usable Landscape actor. "
+                "Landscape creation requires the editor Landscape mode/import path, which is not exposed "
+                "through this Python API."
+            ),
+            data={"spawned_class": actor_class_name},
         )
 
     try:

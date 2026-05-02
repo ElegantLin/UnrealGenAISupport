@@ -59,12 +59,18 @@ def parse_graph_path(path: str) -> List[str]:
     """Split a graph path like ``AnimGraph/Locomotion/Walk`` into tokens.
 
     * Leading/trailing slashes are tolerated.
+    * Full UObject graph paths like ``/Game/ABP.ABP:AnimGraph`` are tolerated.
     * Empty path is rejected.
     * Tokens preserve their case.
     """
     if not isinstance(path, str):
         raise AnimBlueprintError("graph_path must be a string")
-    cleaned = path.strip().strip("/")
+    raw = path.strip().replace("\\", "/").replace("::", "/")
+    if ":" in raw:
+        prefix, _, suffix = raw.rpartition(":")
+        if prefix.startswith("/") or "/" in prefix or "." in prefix:
+            raw = suffix
+    cleaned = raw.strip().strip("/")
     if not cleaned:
         raise AnimBlueprintError("graph_path is empty")
     parts = [p for p in _PATH_SPLIT_RE.split(cleaned) if p]

@@ -78,11 +78,17 @@ def normalize_graph_path(path: Any) -> str:
 
     A graph path looks like ``EventGraph/MyFunction/InnerNode`` or
     ``UbergraphPages/EventGraph``.  We accept ``\\``, ``.`` or ``::`` as
-    separators and normalise to ``/``.
+    separators and normalise to ``/``.  Unreal's ``UEdGraph::GetPathName`` can
+    also return full object paths such as ``/Game/BP.BP:EventGraph``; callers
+    should be able to pass those schema paths back unchanged.
     """
 
-    raw = str(path or "")
-    cleaned = raw.replace("\\", "/").replace("::", "/").replace(".", "/")
+    raw = str(path or "").strip().replace("\\", "/").replace("::", "/")
+    if ":" in raw:
+        prefix, _, suffix = raw.rpartition(":")
+        if prefix.startswith("/") or "/" in prefix or "." in prefix:
+            raw = suffix
+    cleaned = raw.replace(".", "/")
     parts = [segment.strip() for segment in cleaned.split("/")]
     parts = [segment for segment in parts if segment]
     return "/".join(parts)

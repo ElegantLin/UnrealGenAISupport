@@ -4,16 +4,8 @@ import sys
 import os
 import subprocess
 from fastmcp import FastMCP
-try:
-    from fastmcp import Image
-except ImportError:
-    from fastmcp.utilities.types import Image
 import re
-import mss
-import base64
 import time
-import tempfile # For creating a secure temporary file
-from io import BytesIO
 from pathlib import Path
 
 try:
@@ -193,6 +185,25 @@ def _tool_response_from_unreal(
         warnings=warnings,
         job_id=result.get("job_id"),
         status=result.get("status"),
+    )
+
+
+def _command_tool_response(
+    command: dict,
+    *,
+    tool_name: str,
+    success_message: str,
+    error_code: str,
+    default_error: str,
+    extra_data=None,
+):
+    return _tool_response_from_unreal(
+        send_to_unreal(command),
+        tool_name=tool_name,
+        success_message=success_message,
+        error_code=error_code,
+        default_error=default_error,
+        extra_data=extra_data,
     )
 
 
@@ -478,39 +489,71 @@ def _restart_editor_impl(force: bool, wait_for_reconnect: bool, timeout_seconds:
 
 
 @mcp.tool()
-def how_to_use() -> str:
-    """Hey LLM, this grabs the how_to_use.md from knowledge_base—it's your cheat sheet for running Unreal with this MCP. Fetch it at the start of a new chat session to get the lowdown on quirks and how shit works."""
+def how_to_use() -> dict:
+    """Load the LLM-oriented MCP usage guide as a structured response envelope."""
     try:
         current_dir = Path(__file__).parent
         md_file_path = current_dir / "knowledge_base" / "how_to_use.md"
 
         if not md_file_path.exists():
-            return "Error: how_to_use.md not found in knowledge_base subfolder."
+            return _tool_error(
+                "how_to_use.md not found in knowledge_base subfolder.",
+                error_code="HOW_TO_USE_NOT_FOUND",
+                data={
+                    "tool": "how_to_use",
+                    "path": str(md_file_path),
+                },
+            )
 
         with open(md_file_path, "r", encoding="utf-8") as md_file:
-            return md_file.read()
+            return _tool_success(
+                "Loaded usage guide.",
+                data={
+                    "tool": "how_to_use",
+                    "path": str(md_file_path),
+                    "content": md_file.read(),
+                },
+            )
 
     except Exception as e:
-        return f"Error loading how_to_use.md: {str(e)}—fix your shit."
+        return _tool_error(
+            f"Error loading how_to_use.md: {str(e)}",
+            error_code="HOW_TO_USE_LOAD_FAILED",
+            data={
+                "tool": "how_to_use",
+            },
+        )
 
 
 # Define basic tools for Claude to call
 
 @mcp.tool()
-def handshake_test(message: str) -> str:
-    """Send a handshake message to Unreal Engine"""
+def handshake_test(message: str) -> dict:
+    """Send a handshake message to Unreal Engine and return a structured response envelope."""
     try:
-        command = {
-            "type": "handshake",
-            "message": message
-        }
-        response = send_to_unreal(command)
-        if response.get("success"):
-            return f"Handshake successful: {response['message']}"
-        else:
-            return f"Handshake failed: {response.get('error', 'Unknown error')}"
+        return _command_tool_response(
+            {
+                "type": "handshake",
+                "message": message,
+            },
+            tool_name="handshake_test",
+            success_message="Handshake successful.",
+            error_code="HANDSHAKE_FAILED",
+            default_error="Handshake failed.",
+            extra_data=lambda result: {
+                "message": message,
+                "connection_info": result.get("connection_info", {}),
+            },
+        )
     except Exception as e:
-        return f"Error communicating with Unreal: {str(e)}"
+        return _tool_error(
+            f"Error communicating with Unreal: {str(e)}",
+            error_code="HANDSHAKE_FAILED",
+            data={
+                "tool": "handshake_test",
+                "message": message,
+            },
+        )
 
 
 @mcp.tool()
@@ -652,7 +695,7 @@ def execute_unreal_command(command: str) -> dict:
 
 @mcp.tool()
 def spawn_object(actor_class: str, location: list = [0, 0, 0], rotation: list = [0, 0, 0],
-                 scale: list = [1, 1, 1], actor_label: str = None) -> str:
+                 scale: list = [1, 1, 1], actor_label: str = None) -> dict:
     """
     Spawn an object in the Unreal Engine level
     
@@ -676,21 +719,36 @@ def spawn_object(actor_class: str, location: list = [0, 0, 0], rotation: list = 
         "actor_label": actor_label
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully spawned {actor_class}" + (f" with label '{actor_label}'" if actor_label else "")
-    else:
-        error = response.get('error', 'Unknown error')
-        # Add hint for Claude to understand what went wrong
+    response = _coerce_unreal_response(send_to_unreal(command))
+    if not response.get("success"):
+        error = response.get("error", "Unknown error")
         if "not found" in error:
-            hint = "\nHint: For basic shapes, use 'Cube', 'Sphere', 'Cylinder', or 'Cone'. For other actors, try using '/Script/Engine.PointLight' format."
-            error += hint
-        return f"Failed to spawn object: {error}"
+            error += (
+                "\nHint: For basic shapes, use 'Cube', 'Sphere', 'Cylinder', or 'Cone'. "
+                "For other actors, try using '/Script/Engine.PointLight' format."
+            )
+            response["error"] = error
+
+    return _tool_response_from_unreal(
+        response,
+        tool_name="spawn_object",
+        success_message="Object spawned successfully.",
+        error_code="SPAWN_OBJECT_FAILED",
+        default_error="Failed to spawn object.",
+        extra_data=lambda result: {
+            "actor_class": actor_class,
+            "location": location,
+            "rotation": rotation,
+            "scale": scale,
+            "actor_label": actor_label,
+            "actor_name": result.get("actor_name"),
+        },
+    )
 
 
 @mcp.tool()
 def edit_component_property(blueprint_path: str, component_name: str, property_name: str, value: str,
-                            is_scene_actor: bool = False, actor_name: str = "") -> str:
+                            is_scene_actor: bool = False, actor_name: str = "") -> dict:
     """
     Edit a property of a component in a Blueprint or scene actor.
 
@@ -725,33 +783,26 @@ def edit_component_property(blueprint_path: str, component_name: str, property_n
         "is_scene_actor": is_scene_actor,
         "actor_name": actor_name
     }
-    response = send_to_unreal(command)
-
-    # CHANGED: Improved response handling to support both string and dict responses
-    try:
-        # Handle case where response is already a dict
-        if isinstance(response, dict):
-            result = response
-        # Handle case where response is a string
-        elif isinstance(response, str):
-            import json
-            result = json.loads(response)
-        else:
-            return f"Error: Unexpected response type: {type(response)}"
-
-        if result.get("success"):
-            return result.get("message", f"Set {property_name} of {component_name} to {value}")
-        else:
-            error = result.get("error", "Unknown error")
-            if "suggestions" in result:
-                error += f"\nSuggestions: {result['suggestions']}"
-            return f"Failed: {error}"
-    except Exception as e:
-        return f"Error: {str(e)}\nRaw response: {response}"
+    return _tool_response_from_unreal(
+        send_to_unreal(command),
+        tool_name="edit_component_property",
+        success_message=f"Updated property '{property_name}' on '{component_name}'.",
+        error_code="EDIT_COMPONENT_PROPERTY_FAILED",
+        default_error="Failed to edit component property.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "component_name": component_name,
+            "property_name": property_name,
+            "value": value,
+            "is_scene_actor": is_scene_actor,
+            "actor_name": actor_name,
+            "suggestions": result.get("suggestions"),
+        },
+    )
 
 
 @mcp.tool()
-def create_material(material_name: str, color: list) -> str:
+def create_material(material_name: str, color: list) -> dict:
     """
     Create a new material with the specified color
     
@@ -768,11 +819,18 @@ def create_material(material_name: str, color: list) -> str:
         "color": color
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully created material '{material_name}' with path: {response.get('material_path')}"
-    else:
-        return f"Failed to create material: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="create_material",
+        success_message="Material created successfully.",
+        error_code="CREATE_MATERIAL_FAILED",
+        default_error="Failed to create material.",
+        extra_data=lambda result: {
+            "material_name": material_name,
+            "color": color,
+            "material_path": result.get("material_path"),
+        },
+    )
 
 
 #
@@ -780,7 +838,7 @@ def create_material(material_name: str, color: list) -> str:
 #
 
 @mcp.tool()
-def create_blueprint(blueprint_name: str, parent_class: str = "Actor", save_path: str = "/Game/Blueprints") -> str:
+def create_blueprint(blueprint_name: str, parent_class: str = "Actor", save_path: str = "/Game/Blueprints") -> dict:
     """
     Create a new Blueprint class
     
@@ -799,53 +857,37 @@ def create_blueprint(blueprint_name: str, parent_class: str = "Actor", save_path
         "save_path": save_path
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully created Blueprint '{blueprint_name}' with path: {response.get('blueprint_path', save_path + '/' + blueprint_name)}"
-    else:
-        return f"Failed to create Blueprint: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="create_blueprint",
+        success_message="Blueprint created successfully.",
+        error_code="CREATE_BLUEPRINT_FAILED",
+        default_error="Failed to create Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_name": blueprint_name,
+            "parent_class": parent_class,
+            "save_path": save_path,
+            "blueprint_path": result.get("blueprint_path", f"{save_path}/{blueprint_name}"),
+        },
+    )
 
 @mcp.tool()
-def take_editor_screenshot() -> Image:
+def take_editor_screenshot() -> dict:
     """
-    Takes a screenshot of the primary monitor using a vendored OS-level library.
-    This is a robust method that requires no installation and bypasses the Unreal API.
+    Deprecated compatibility wrapper for editor viewport capture.
+
+    This intentionally delegates to ``capture_editor_viewport`` so the tool
+    captures Unreal's viewport rather than the user's full desktop.
     """
-    temp_path = "" # Ensure path is in scope for the finally block
-    try:
-        # 1. Create a secure, temporary file path with a .png extension.
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fp:
-            temp_path = fp.name
-
-        # 2. Use the simplest 'shot' method from mss to save the screenshot to the temp file.
-        with mss.mss() as sct:
-            sct.shot(mon=1, output=temp_path)
-
-        # 3. Read the created temporary file in binary mode to get the raw bytes.
-        with open(temp_path, "rb") as image_file:
-            image_bytes = image_file.read()
-
-        # 4. Return the Image object directly with the raw bytes.
-        #    The FastMCP library handles the encoding internally.
-        return Image(
-            data=image_bytes,
-            format="png"
-        )
-
-    except Exception as e:
-        error_message = f"OS-level screenshot failed: {str(e)}"
-        print(error_message)
-        # Return the error as text if something goes wrong.
-        return error_message
-
-    finally:
-        # 5. Clean up by deleting the temporary file.
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+    response = capture_editor_viewport()
+    warnings = _response_warnings(response)
+    warnings.append("take_editor_screenshot is deprecated; use capture_editor_viewport.")
+    response["warnings"] = warnings
+    return response
 
 
 @mcp.tool()
-def add_component_to_blueprint(blueprint_path: str, component_class: str, component_name: str = None) -> str:
+def add_component_to_blueprint(blueprint_path: str, component_class: str, component_name: str = None) -> dict:
     """
     Add a component to a Blueprint
     
@@ -864,16 +906,23 @@ def add_component_to_blueprint(blueprint_path: str, component_class: str, compon
         "component_name": component_name
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully added {component_class} to Blueprint at {blueprint_path}"
-    else:
-        return f"Failed to add component: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="add_component_to_blueprint",
+        success_message="Component added to Blueprint successfully.",
+        error_code="ADD_COMPONENT_FAILED",
+        default_error="Failed to add component to Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "component_class": component_class,
+            "component_name": component_name,
+        },
+    )
 
 
 @mcp.tool()
 def add_variable_to_blueprint(blueprint_path: str, variable_name: str, variable_type: str,
-                              default_value: str = None, category: str = "Default") -> str:
+                              default_value: str = None, category: str = "Default") -> dict:
     """
     Add a variable to a Blueprint
     
@@ -900,16 +949,25 @@ def add_variable_to_blueprint(blueprint_path: str, variable_name: str, variable_
         "category": category
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully added {variable_type} variable '{variable_name}' to Blueprint at {blueprint_path}"
-    else:
-        return f"Failed to add variable: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="add_variable_to_blueprint",
+        success_message="Blueprint variable added successfully.",
+        error_code="ADD_VARIABLE_FAILED",
+        default_error="Failed to add variable to Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "variable_name": variable_name,
+            "variable_type": variable_type,
+            "default_value": default_value,
+            "category": category,
+        },
+    )
 
 
 @mcp.tool()
 def add_function_to_blueprint(blueprint_path: str, function_name: str,
-                              inputs: list = None, outputs: list = None) -> str:
+                              inputs: list = None, outputs: list = None) -> dict:
     """
     Add a function to a Blueprint
     
@@ -935,16 +993,25 @@ def add_function_to_blueprint(blueprint_path: str, function_name: str,
         "outputs": outputs
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully added function '{function_name}' to Blueprint at {blueprint_path} with ID: {response.get('function_id', 'unknown')}"
-    else:
-        return f"Failed to add function: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="add_function_to_blueprint",
+        success_message="Blueprint function added successfully.",
+        error_code="ADD_FUNCTION_FAILED",
+        default_error="Failed to add function to Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "function_name": function_name,
+            "inputs": inputs,
+            "outputs": outputs,
+            "function_id": result.get("function_id"),
+        },
+    )
 
 
 @mcp.tool()
 def add_node_to_blueprint(blueprint_path: str, function_id: str, node_type: str,
-                          node_position: list = [0, 0], node_properties: dict = None) -> str:
+                          node_position: list = [0, 0], node_properties: dict = None) -> dict:
     """
     Add a node to a Blueprint graph
     
@@ -985,15 +1052,25 @@ def add_node_to_blueprint(blueprint_path: str, function_id: str, node_type: str,
         "node_properties": node_properties
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully added {node_type} node to function {function_id} in Blueprint at {blueprint_path} with ID: {response.get('node_id', 'unknown')}"
-    else:
-        return f"Failed to add node: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="add_node_to_blueprint",
+        success_message="Blueprint node added successfully.",
+        error_code="ADD_NODE_FAILED",
+        default_error="Failed to add node to Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "function_id": function_id,
+            "node_type": node_type,
+            "node_position": node_position,
+            "node_properties": node_properties,
+            "node_id": result.get("node_id"),
+        },
+    )
 
 
 @mcp.tool()
-def get_node_suggestions(node_type: str) -> str:
+def get_node_suggestions(node_type: str) -> dict:
     """
     Get suggestions for a node type in Unreal Blueprints
     
@@ -1008,20 +1085,21 @@ def get_node_suggestions(node_type: str) -> str:
         "node_type": node_type
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        suggestions = response.get("suggestions", [])
-        if suggestions:
-            return f"Suggestions for '{node_type}': {', '.join(suggestions)}"
-        else:
-            return f"No suggestions found for '{node_type}'"
-    else:
-        error = response.get("error", "Unknown error")
-        return f"Failed to get suggestions for '{node_type}': {error}"
+    return _command_tool_response(
+        command,
+        tool_name="get_node_suggestions",
+        success_message="Node suggestions loaded.",
+        error_code="GET_NODE_SUGGESTIONS_FAILED",
+        default_error="Failed to get node suggestions.",
+        extra_data=lambda result: {
+            "node_type": node_type,
+            "suggestions": result.get("suggestions", []),
+        },
+    )
 
 
 @mcp.tool()
-def delete_node_from_blueprint(blueprint_path: str, function_id: str, node_id: str) -> str:
+def delete_node_from_blueprint(blueprint_path: str, function_id: str, node_id: str) -> dict:
     """
     Delete a node from a Blueprint graph
     
@@ -1040,15 +1118,22 @@ def delete_node_from_blueprint(blueprint_path: str, function_id: str, node_id: s
         "node_id": node_id
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully deleted node {node_id} from function {function_id} in Blueprint at {blueprint_path}"
-    else:
-        return f"Failed to delete node: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="delete_node_from_blueprint",
+        success_message="Blueprint node deleted successfully.",
+        error_code="DELETE_NODE_FAILED",
+        default_error="Failed to delete node from Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "function_id": function_id,
+            "node_id": node_id,
+        },
+    )
 
 
 @mcp.tool()
-def get_all_nodes_in_graph(blueprint_path: str, function_id: str) -> str:
+def get_all_nodes_in_graph(blueprint_path: str, function_id: str) -> dict:
     """
     Get all nodes in a Blueprint graph with their positions and types
     
@@ -1065,17 +1150,24 @@ def get_all_nodes_in_graph(blueprint_path: str, function_id: str) -> str:
         "function_id": function_id
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return response.get("nodes", "[]")
-    else:
-        return f"Failed to get nodes: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="get_all_nodes_in_graph",
+        success_message="Graph nodes loaded.",
+        error_code="GET_ALL_NODES_FAILED",
+        default_error="Failed to get nodes from Blueprint graph.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "function_id": function_id,
+            "nodes": result.get("nodes", []),
+        },
+    )
 
 
 @mcp.tool()
 def connect_blueprint_nodes(blueprint_path: str, function_id: str,
                             source_node_id: str, source_pin: str,
-                            target_node_id: str, target_pin: str) -> str:
+                            target_node_id: str, target_pin: str) -> dict:
     command = {
         "type": "connect_nodes",
         "blueprint_path": blueprint_path,
@@ -1086,19 +1178,29 @@ def connect_blueprint_nodes(blueprint_path: str, function_id: str,
         "target_pin": target_pin
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully connected {source_node_id}.{source_pin} to {target_node_id}.{target_pin} in Blueprint at {blueprint_path}"
-    else:
-        error = response.get("error", "Unknown error")
-        if "source_available_pins" in response and "target_available_pins" in response:
-            error += f"\nAvailable pins on source ({source_node_id}): {json.dumps(response['source_available_pins'], indent=2)}"
-            error += f"\nAvailable pins on target ({target_node_id}): {json.dumps(response['target_available_pins'], indent=2)}"
-        return f"Failed to connect nodes: {error}"
+    return _command_tool_response(
+        command,
+        tool_name="connect_blueprint_nodes",
+        success_message="Blueprint nodes connected successfully.",
+        error_code="CONNECT_NODES_FAILED",
+        default_error="Failed to connect Blueprint nodes.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "function_id": function_id,
+            "source_node_id": source_node_id,
+            "source_pin": source_pin,
+            "target_node_id": target_node_id,
+            "target_pin": target_pin,
+            "source_available_pins": result.get("source_available_pins", []),
+            "target_available_pins": result.get("target_available_pins", []),
+            "source_pin_details": result.get("source_pin"),
+            "target_pin_details": result.get("target_pin"),
+        },
+    )
 
 
 @mcp.tool()
-def compile_blueprint(blueprint_path: str) -> str:
+def compile_blueprint(blueprint_path: str) -> dict:
     """
     Compile a Blueprint
     
@@ -1113,17 +1215,22 @@ def compile_blueprint(blueprint_path: str) -> str:
         "blueprint_path": blueprint_path
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully compiled Blueprint at {blueprint_path}"
-    else:
-        return f"Failed to compile Blueprint: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="compile_blueprint",
+        success_message="Blueprint compiled successfully.",
+        error_code="COMPILE_BLUEPRINT_FAILED",
+        default_error="Failed to compile Blueprint.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+        },
+    )
 
 
 @mcp.tool()
 def spawn_blueprint_actor(blueprint_path: str, location: list = [0, 0, 0],
                           rotation: list = [0, 0, 0], scale: list = [1, 1, 1],
-                          actor_label: str = None) -> str:
+                          actor_label: str = None) -> dict:
     """
     Spawn a Blueprint actor in the level
     
@@ -1146,12 +1253,21 @@ def spawn_blueprint_actor(blueprint_path: str, location: list = [0, 0, 0],
         "actor_label": actor_label
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        return f"Successfully spawned Blueprint {blueprint_path}" + (
-            f" with label '{actor_label}'" if actor_label else "")
-    else:
-        return f"Failed to spawn Blueprint: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="spawn_blueprint_actor",
+        success_message="Blueprint actor spawned successfully.",
+        error_code="SPAWN_BLUEPRINT_FAILED",
+        default_error="Failed to spawn Blueprint actor.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "location": location,
+            "rotation": rotation,
+            "scale": scale,
+            "actor_label": actor_label,
+            "actor_name": result.get("actor_name"),
+        },
+    )
 
 
 # @mcp.tool()
@@ -1282,7 +1398,7 @@ def add_component_with_events(blueprint_path: str, component_name: str, componen
 
 
 @mcp.tool()
-def connect_blueprint_nodes_bulk(blueprint_path: str, function_id: str, connections: list) -> str:
+def connect_blueprint_nodes_bulk(blueprint_path: str, function_id: str, connections: list) -> dict:
     """
     Connect multiple pairs of nodes in a Blueprint graph
     
@@ -1305,39 +1421,26 @@ def connect_blueprint_nodes_bulk(blueprint_path: str, function_id: str, connecti
         "connections": connections
     }
 
-    response = send_to_unreal(command)
-
-    # Handle the new detailed response format
-    if response.get("success"):
-        successful = response.get("successful_connections", 0)
-        total = response.get("total_connections", 0)
-        return f"Successfully connected {successful}/{total} node pairs in Blueprint at {blueprint_path}"
-    else:
-        # Extract detailed error information
-        error_message = response.get("error", "Unknown error")
-        failed_connections = []
-
-        # Look for detailed results in the response
-        if "results" in response:
-            for result in response.get("results", []):
-                if not result.get("success", False):
-                    idx = result.get("connection_index", -1)
-                    src = result.get("source_node", "unknown")
-                    tgt = result.get("target_node", "unknown")
-                    err = result.get("error", "unknown error")
-                    failed_connections.append(f"Connection {idx}: {src} to {tgt} - {err}")
-
-        # Format error message with details
-        if failed_connections:
-            detailed_errors = "\n- " + "\n- ".join(failed_connections)
-            return f"Failed to connect nodes: {error_message}{detailed_errors}"
-        else:
-            return f"Failed to connect nodes: {error_message}"
+    return _command_tool_response(
+        command,
+        tool_name="connect_blueprint_nodes_bulk",
+        success_message="Bulk Blueprint node connections completed.",
+        error_code="CONNECT_NODES_BULK_FAILED",
+        default_error="Failed to connect Blueprint nodes in bulk.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "function_id": function_id,
+            "connections": connections,
+            "successful_connections": result.get("successful_connections", 0),
+            "total_connections": result.get("total_connections", 0),
+            "results": result.get("results", []),
+        },
+    )
 
 
 @mcp.tool()
 def get_blueprint_node_guid(blueprint_path: str, graph_type: str = "EventGraph", node_name: str = None,
-                            function_id: str = None) -> str:
+                            function_id: str = None) -> dict:
     """
     Retrieve the GUID of a pre-existing node in a Blueprint graph.
     
@@ -1358,12 +1461,20 @@ def get_blueprint_node_guid(blueprint_path: str, graph_type: str = "EventGraph",
         "function_id": function_id if function_id else ""
     }
 
-    response = send_to_unreal(command)
-    if response.get("success"):
-        guid = response.get("node_guid")
-        return f"Node GUID for {node_name or 'FunctionEntry'} in {graph_type} of {blueprint_path}: {guid}"
-    else:
-        return f"Failed to get node GUID: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="get_blueprint_node_guid",
+        success_message="Blueprint node GUID loaded.",
+        error_code="GET_BLUEPRINT_NODE_GUID_FAILED",
+        default_error="Failed to get Blueprint node GUID.",
+        extra_data=lambda result: {
+            "blueprint_path": blueprint_path,
+            "graph_type": graph_type,
+            "node_name": node_name,
+            "function_id": function_id,
+            "node_guid": result.get("node_guid"),
+        },
+    )
 
 
 # Safety check for potentially destructive actions
@@ -1388,7 +1499,7 @@ def is_potentially_destructive(script: str) -> bool:
 
 
 @mcp.tool()
-def enable_plugin(plugin_name: str, target_allow_list: list = None) -> str:
+def enable_plugin(plugin_name: str, target_allow_list: list = None) -> dict:
     """
     Enable a plugin in the current Unreal project's .uproject file.
 
@@ -1399,20 +1510,24 @@ def enable_plugin(plugin_name: str, target_allow_list: list = None) -> str:
     Returns:
         Message indicating success or failure.
     """
-    response = send_to_unreal({
-        "type": "set_plugin_enabled",
-        "plugin_name": plugin_name,
-        "enabled": True,
-        "target_allow_list": target_allow_list,
-    })
-
-    if response.get("success"):
-        message = response.get("message", f"Enabled plugin '{plugin_name}'.")
-        if response.get("project_file_path"):
-            message += f" Project file: {response['project_file_path']}"
-        return message
-
-    return f"Failed to enable plugin '{plugin_name}': {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        {
+            "type": "set_plugin_enabled",
+            "plugin_name": plugin_name,
+            "enabled": True,
+            "target_allow_list": target_allow_list,
+        },
+        tool_name="enable_plugin",
+        success_message=f"Enabled plugin '{plugin_name}'.",
+        error_code="ENABLE_PLUGIN_FAILED",
+        default_error=f"Failed to enable plugin '{plugin_name}'.",
+        extra_data=lambda result: {
+            "plugin_name": plugin_name,
+            "target_allow_list": target_allow_list,
+            "project_file_path": result.get("project_file_path"),
+            "restart_required": result.get("restart_required", False),
+        },
+    )
 
 
 @mcp.tool()
@@ -2163,10 +2278,10 @@ def get_anim_blueprint_structure(anim_blueprint_path: str) -> dict:
 
 
 @mcp.tool()
-def get_graph_nodes(anim_blueprint_path: str, graph_path: str) -> dict:
+def get_anim_graph_nodes(anim_blueprint_path: str, graph_path: str) -> dict:
     """List nodes inside an AnimBlueprint graph path (e.g. ``AnimGraph/Locomotion``)."""
     return _forward_structured_socket_response(
-        send_to_unreal({"type": "get_graph_nodes", "anim_blueprint_path": anim_blueprint_path, "graph_path": graph_path}),
+        send_to_unreal({"type": "get_anim_graph_nodes", "anim_blueprint_path": anim_blueprint_path, "graph_path": graph_path}),
         success_message="Graph nodes retrieved.",
         error_code="ANIM_BP_READ_FAILED",
         default_error="Unable to read graph nodes.",
@@ -2174,11 +2289,11 @@ def get_graph_nodes(anim_blueprint_path: str, graph_path: str) -> dict:
 
 
 @mcp.tool()
-def get_graph_pins(anim_blueprint_path: str, graph_path: str, node_id: str) -> dict:
+def get_anim_graph_pins(anim_blueprint_path: str, graph_path: str, node_id: str) -> dict:
     """List pins of a specific node inside an AnimBlueprint graph."""
     return _forward_structured_socket_response(
         send_to_unreal({
-            "type": "get_graph_pins",
+            "type": "get_anim_graph_pins",
             "anim_blueprint_path": anim_blueprint_path,
             "graph_path": graph_path,
             "node_id": node_id,
@@ -2190,10 +2305,10 @@ def get_graph_pins(anim_blueprint_path: str, graph_path: str, node_id: str) -> d
 
 
 @mcp.tool()
-def resolve_graph_by_path(anim_blueprint_path: str, graph_path: str) -> dict:
+def resolve_anim_graph_by_path(anim_blueprint_path: str, graph_path: str) -> dict:
     """Resolve an AnimBlueprint graph path to stable selectors."""
     return _forward_structured_socket_response(
-        send_to_unreal({"type": "resolve_graph_by_path", "anim_blueprint_path": anim_blueprint_path, "graph_path": graph_path}),
+        send_to_unreal({"type": "resolve_anim_graph_by_path", "anim_blueprint_path": anim_blueprint_path, "graph_path": graph_path}),
         success_message="Graph resolved.",
         error_code="ANIM_BP_READ_FAILED",
         default_error="Unable to resolve graph path.",
@@ -2411,7 +2526,7 @@ def set_apply_additive_chain(anim_blueprint_path: str, base_node: str, additive_
 
 # Scene Control
 @mcp.tool()
-def get_all_scene_objects() -> str:
+def get_all_scene_objects() -> dict:
     """
     Retrieve all actors in the current Unreal Engine level.
     
@@ -2419,13 +2534,21 @@ def get_all_scene_objects() -> str:
         JSON string of actors with their names, classes, and locations.
     """
     command = {"type": "get_all_scene_objects"}
-    response = send_to_unreal(command)
-    return json.dumps(response) if response.get("success") else f"Failed: {response.get('error', 'Unknown error')}"
+    return _command_tool_response(
+        command,
+        tool_name="get_all_scene_objects",
+        success_message="Scene objects loaded.",
+        error_code="GET_ALL_SCENE_OBJECTS_FAILED",
+        default_error="Failed to load scene objects.",
+        extra_data=lambda result: {
+            "actors": result.get("actors", []),
+        },
+    )
 
 
 # Project Control
 @mcp.tool()
-def create_project_folder(folder_path: str) -> str:
+def create_project_folder(folder_path: str) -> dict:
     """
     Create a new folder in the Unreal project content directory.
     
@@ -2433,12 +2556,20 @@ def create_project_folder(folder_path: str) -> str:
         folder_path: Path relative to /Game (e.g., "FlappyBird/Assets")
     """
     command = {"type": "create_project_folder", "folder_path": folder_path}
-    response = send_to_unreal(command)
-    return response.get("message", f"Failed: {response.get('error', 'Unknown error')}")
+    return _command_tool_response(
+        command,
+        tool_name="create_project_folder",
+        success_message="Project folder created.",
+        error_code="CREATE_PROJECT_FOLDER_FAILED",
+        default_error="Failed to create project folder.",
+        extra_data=lambda result: {
+            "folder_path": folder_path,
+        },
+    )
 
 
 @mcp.tool()
-def get_files_in_folder(folder_path: str) -> str:
+def get_files_in_folder(folder_path: str) -> dict:
     """
     List all files in a specified project folder.
     
@@ -2446,12 +2577,21 @@ def get_files_in_folder(folder_path: str) -> str:
         folder_path: Path relative to /Game (e.g., "FlappyBird/Assets")
     """
     command = {"type": "get_files_in_folder", "folder_path": folder_path}
-    response = send_to_unreal(command)
-    return json.dumps(response.get("files", [])) if response.get("success") else f"Failed: {response.get('error')}"
+    return _command_tool_response(
+        command,
+        tool_name="get_files_in_folder",
+        success_message="Folder contents loaded.",
+        error_code="GET_FILES_IN_FOLDER_FAILED",
+        default_error="Failed to list files in folder.",
+        extra_data=lambda result: {
+            "folder_path": folder_path,
+            "files": result.get("files", []),
+        },
+    )
 
 
 @mcp.tool()
-def create_game_mode(game_mode_path: str, pawn_blueprint_path: str, base_class: str = "GameModeBase") -> str:
+def create_game_mode(game_mode_path: str, pawn_blueprint_path: str, base_class: str = "GameModeBase") -> dict:
     """Create a game mode Blueprint, set its default pawn, and assign it as the current scene’s default game mode.
     Args:
         game_mode_path: Path for new game mode (e.g., "/Game/MyGameMode")
@@ -2459,22 +2599,39 @@ def create_game_mode(game_mode_path: str, pawn_blueprint_path: str, base_class: 
         base_class: Base class for game mode (default: "GameModeBase")
     """
     try:
-        command = {
-            "type": "create_game_mode",
-            "game_mode_path": game_mode_path,
-            "pawn_blueprint_path": pawn_blueprint_path,
-            "base_class": base_class
-        }
-        response = send_to_unreal(command)
-        parsed = json.loads(response)
-        return parsed.get("message", f"Failed: {parsed.get('error')}")
+        return _command_tool_response(
+            {
+                "type": "create_game_mode",
+                "game_mode_path": game_mode_path,
+                "pawn_blueprint_path": pawn_blueprint_path,
+                "base_class": base_class,
+            },
+            tool_name="create_game_mode",
+            success_message="Game mode created successfully.",
+            error_code="CREATE_GAME_MODE_FAILED",
+            default_error="Failed to create game mode.",
+            extra_data=lambda result: {
+                "game_mode_path": game_mode_path,
+                "pawn_blueprint_path": pawn_blueprint_path,
+                "base_class": base_class,
+            },
+        )
     except Exception as e:
-        return f"Error creating game mode: {str(e)}"
+        return _tool_error(
+            f"Error creating game mode: {str(e)}",
+            error_code="CREATE_GAME_MODE_FAILED",
+            data={
+                "tool": "create_game_mode",
+                "game_mode_path": game_mode_path,
+                "pawn_blueprint_path": pawn_blueprint_path,
+                "base_class": base_class,
+            },
+        )
 
 
 @mcp.tool()
 def add_widget_to_user_widget(user_widget_path: str, widget_type: str, widget_name: str,
-                              parent_widget_name: str = "") -> str:
+                              parent_widget_name: str = "") -> dict:
     """
     Adds a new widget (like TextBlock, Button, Image, CanvasPanel, VerticalBox) to a User Widget Blueprint.
 
@@ -2487,35 +2644,30 @@ def add_widget_to_user_widget(user_widget_path: str, widget_type: str, widget_na
     Returns:
         JSON string indicating success (with actual widget name) or failure with an error message.
     """
-    command = {
-        "type": "add_widget_to_user_widget",
-        "user_widget_path": user_widget_path,
-        "widget_type": widget_type,
-        "widget_name": widget_name,
-        "parent_widget_name": parent_widget_name
-    }
-    # Use json.loads to parse the JSON string returned by send_to_unreal
-    response_str = send_to_unreal(command)
-    try:
-        response_dict = json.loads(response_str)
-        # Return a user-friendly string summary
-        if response_dict.get("success"):
-            actual_name = response_dict.get("widget_name", widget_name)
-            return response_dict.get("message",
-                                     f"Successfully added widget '{actual_name}' of type '{widget_type}' to '{user_widget_path}'.")
-        else:
-            return f"Failed to add widget: {response_dict.get('error', 'Unknown C++ error')}"
-    except json.JSONDecodeError:
-        return f"Failed to parse response from Unreal: {response_str}"
-    except Exception as e:
-        # Catch potential errors if send_to_unreal itself failed before returning JSON
-        if isinstance(response_str, dict) and not response_str.get("success"):
-            return f"Failed to send command: {response_str.get('error', 'Unknown MCP error')}"
-        return f"An unexpected error occurred: {str(e)} Response: {response_str}"
+    return _command_tool_response(
+        {
+            "type": "add_widget_to_user_widget",
+            "user_widget_path": user_widget_path,
+            "widget_type": widget_type,
+            "widget_name": widget_name,
+            "parent_widget_name": parent_widget_name,
+        },
+        tool_name="add_widget_to_user_widget",
+        success_message="Widget added to User Widget successfully.",
+        error_code="ADD_WIDGET_FAILED",
+        default_error="Failed to add widget to User Widget.",
+        extra_data=lambda result: {
+            "user_widget_path": user_widget_path,
+            "widget_type": widget_type,
+            "widget_name": widget_name,
+            "parent_widget_name": parent_widget_name,
+            "actual_widget_name": result.get("widget_name"),
+        },
+    )
 
 
 @mcp.tool()
-def edit_widget_property(user_widget_path: str, widget_name: str, property_name: str, value: str) -> str:
+def edit_widget_property(user_widget_path: str, widget_name: str, property_name: str, value: str) -> dict:
     """
     Edits a property of a specific widget within a User Widget Blueprint.
 
@@ -2539,35 +2691,30 @@ def edit_widget_property(user_widget_path: str, widget_name: str, property_name:
     Returns:
         JSON string indicating success or failure with an error message.
     """
-    command = {
-        "type": "edit_widget_property",
-        "user_widget_path": user_widget_path,
-        "widget_name": widget_name,
-        "property_name": property_name,
-        "value": value  # Pass the string value directly
-    }
-    # Use json.loads to parse the JSON string returned by send_to_unreal
-    response_str = send_to_unreal(command)
-    try:
-        response_dict = json.loads(response_str)
-        # Return a user-friendly string summary
-        if response_dict.get("success"):
-            return response_dict.get("message",
-                                     f"Successfully set property '{property_name}' on widget '{widget_name}'.")
-        else:
-            return f"Failed to edit widget property: {response_dict.get('error', 'Unknown C++ error')}"
-    except json.JSONDecodeError:
-        return f"Failed to parse response from Unreal: {response_str}"
-    except Exception as e:
-        # Catch potential errors if send_to_unreal itself failed before returning JSON
-        if isinstance(response_str, dict) and not response_str.get("success"):
-            return f"Failed to send command: {response_str.get('error', 'Unknown MCP error')}"
-        return f"An unexpected error occurred: {str(e)} Response: {response_str}"
+    return _command_tool_response(
+        {
+            "type": "edit_widget_property",
+            "user_widget_path": user_widget_path,
+            "widget_name": widget_name,
+            "property_name": property_name,
+            "value": value,
+        },
+        tool_name="edit_widget_property",
+        success_message="Widget property updated successfully.",
+        error_code="EDIT_WIDGET_PROPERTY_FAILED",
+        default_error="Failed to edit widget property.",
+        extra_data=lambda result: {
+            "user_widget_path": user_widget_path,
+            "widget_name": widget_name,
+            "property_name": property_name,
+            "value": value,
+        },
+    )
 
 
 # Input
 @mcp.tool()
-def add_input_binding(action_name: str, key: str) -> str:
+def add_input_binding(action_name: str, key: str) -> dict:
     """
     Add an input action binding to Project Settings.
     
@@ -2575,9 +2722,17 @@ def add_input_binding(action_name: str, key: str) -> str:
         action_name: Name of the action (e.g., "Flap")
         key: Key to bind (e.g., "Space Bar")
     """
-    command = {"type": "add_input_binding", "action_name": action_name, "key": key}
-    response = send_to_unreal(command)
-    return response.get("message", f"Failed: {response.get('error')}")
+    return _command_tool_response(
+        {"type": "add_input_binding", "action_name": action_name, "key": key},
+        tool_name="add_input_binding",
+        success_message="Input binding added successfully.",
+        error_code="ADD_INPUT_BINDING_FAILED",
+        default_error="Failed to add input binding.",
+        extra_data=lambda result: {
+            "action_name": action_name,
+            "key": key,
+        },
+    )
 
 
 def _resolve_fab_search(query: str, max_results: int, timeout_seconds: float) -> dict:
@@ -2646,7 +2801,7 @@ def _select_fab_result(results: list, preferred_listing_id_or_url: str = "", pre
 
 
 @mcp.tool()
-def search_free_fab_assets(query: str, max_results: int = 10, timeout_seconds: float = 60.0) -> str:
+def search_free_fab_assets(query: str, max_results: int = 10, timeout_seconds: float = 60.0) -> dict:
     """
     Search Fab for free Unreal Engine content assets and return verified Add-to-Project results.
 
@@ -2658,11 +2813,25 @@ def search_free_fab_assets(query: str, max_results: int = 10, timeout_seconds: f
     Returns:
         JSON string containing the final Fab search operation result.
     """
-    return json.dumps(_resolve_fab_search(query, max_results, timeout_seconds))
+    return _tool_response_from_unreal(
+        _resolve_fab_search(query, max_results, timeout_seconds),
+        tool_name="search_free_fab_assets",
+        success_message="Fab search completed.",
+        error_code="FAB_SEARCH_FAILED",
+        default_error="Fab search failed.",
+        extra_data=lambda result: {
+            "query": query,
+            "max_results": max_results,
+            "timeout_seconds": timeout_seconds,
+            "results": result.get("results", []),
+            "status": result.get("status"),
+            "operation_id": result.get("operation_id"),
+        },
+    )
 
 
 @mcp.tool()
-def add_free_fab_asset_to_project(listing_id_or_url: str, timeout_seconds: float = 180.0) -> str:
+def add_free_fab_asset_to_project(listing_id_or_url: str, timeout_seconds: float = 180.0) -> dict:
     """
     Add a free Fab asset to the current Unreal project using its listing id or listing URL.
 
@@ -2673,7 +2842,20 @@ def add_free_fab_asset_to_project(listing_id_or_url: str, timeout_seconds: float
     Returns:
         JSON string containing the final Fab import operation result.
     """
-    return json.dumps(_resolve_fab_import(listing_id_or_url, timeout_seconds))
+    return _tool_response_from_unreal(
+        _resolve_fab_import(listing_id_or_url, timeout_seconds),
+        tool_name="add_free_fab_asset_to_project",
+        success_message="Fab asset import completed.",
+        error_code="FAB_IMPORT_FAILED",
+        default_error="Fab asset import failed.",
+        extra_data=lambda result: {
+            "listing_id_or_url": listing_id_or_url,
+            "timeout_seconds": timeout_seconds,
+            "import_path": result.get("import_path"),
+            "status": result.get("status"),
+            "operation_id": result.get("operation_id"),
+        },
+    )
 
 
 @mcp.tool()
@@ -2684,7 +2866,7 @@ def search_and_add_free_fab_asset(
     max_results: int = 8,
     search_timeout_seconds: float = 60.0,
     import_timeout_seconds: float = 180.0
-) -> str:
+) -> dict:
     """
     Search Fab for a free content asset and immediately add a verified result to the current project.
 
@@ -2701,17 +2883,39 @@ def search_and_add_free_fab_asset(
     """
     search_response = _resolve_fab_search(query, max_results, search_timeout_seconds)
     if not search_response.get("success"):
-        return json.dumps(search_response)
+        return _tool_response_from_unreal(
+            search_response,
+            tool_name="search_and_add_free_fab_asset",
+            success_message="Fab search and import completed.",
+            error_code="FAB_SEARCH_AND_IMPORT_FAILED",
+            default_error="Fab search failed before import could start.",
+            extra_data=lambda result: {
+                "query": query,
+                "preferred_listing_id_or_url": preferred_listing_id_or_url,
+                "preferred_title_substring": preferred_title_substring,
+                "max_results": max_results,
+                "search_timeout_seconds": search_timeout_seconds,
+                "import_timeout_seconds": import_timeout_seconds,
+                "search_result": result,
+            },
+        )
 
     results = _extract_fab_results(search_response)
     if not results:
-        return json.dumps({
-            "success": False,
-            "status": "error",
-            "query": query,
-            "error": "Fab search completed without any verified Add-to-Project results.",
-            "search_result": search_response
-        })
+        return _tool_error(
+            "Fab search completed without any verified Add-to-Project results.",
+            error_code="FAB_NO_RESULTS",
+            data={
+                "tool": "search_and_add_free_fab_asset",
+                "query": query,
+                "preferred_listing_id_or_url": preferred_listing_id_or_url,
+                "preferred_title_substring": preferred_title_substring,
+                "max_results": max_results,
+                "search_timeout_seconds": search_timeout_seconds,
+                "import_timeout_seconds": import_timeout_seconds,
+                "search_result": search_response,
+            },
+        )
 
     selected_result, selection_reason = _select_fab_result(
         results,
@@ -2719,13 +2923,20 @@ def search_and_add_free_fab_asset(
         preferred_title_substring=preferred_title_substring
     )
     if selected_result is None:
-        return json.dumps({
-            "success": False,
-            "status": "error",
-            "query": query,
-            "error": "Unable to choose a Fab result to import from the verified search results.",
-            "search_result": search_response
-        })
+        return _tool_error(
+            "Unable to choose a Fab result to import from the verified search results.",
+            error_code="FAB_SELECTION_FAILED",
+            data={
+                "tool": "search_and_add_free_fab_asset",
+                "query": query,
+                "preferred_listing_id_or_url": preferred_listing_id_or_url,
+                "preferred_title_substring": preferred_title_substring,
+                "max_results": max_results,
+                "search_timeout_seconds": search_timeout_seconds,
+                "import_timeout_seconds": import_timeout_seconds,
+                "search_result": search_response,
+            },
+        )
 
     listing_target = selected_result.get("listing_id") or selected_result.get("listing_url")
     import_response = _resolve_fab_import(str(listing_target), import_timeout_seconds)
@@ -2744,7 +2955,26 @@ def search_and_add_free_fab_asset(
     if not import_response.get("success"):
         combined_response["error"] = import_response.get("error", "Fab import failed")
 
-    return json.dumps(combined_response)
+    return _tool_response_from_unreal(
+        combined_response,
+        tool_name="search_and_add_free_fab_asset",
+        success_message="Fab search and import completed.",
+        error_code="FAB_SEARCH_AND_IMPORT_FAILED",
+        default_error="Fab search and import failed.",
+        extra_data=lambda result: {
+            "query": query,
+            "preferred_listing_id_or_url": preferred_listing_id_or_url,
+            "preferred_title_substring": preferred_title_substring,
+            "max_results": max_results,
+            "search_timeout_seconds": search_timeout_seconds,
+            "import_timeout_seconds": import_timeout_seconds,
+            "selection_reason": result.get("selection_reason"),
+            "selected_result": result.get("selected_result"),
+            "search_result": result.get("search_result"),
+            "import_result": result.get("import_result"),
+            "import_path": result.get("import_path"),
+        },
+    )
 
 
 # ===========================================================================

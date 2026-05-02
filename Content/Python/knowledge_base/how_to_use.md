@@ -8,6 +8,7 @@ This plugin lets an LLM (like you, Claude) boss around Unreal Engine with MCP. A
 
 - **Fresh Session Rule**: Call `get_capabilities` or `preflight_project` before doing real work in a new editor session. Use that output to detect unsafe commands, missing plugins, editor path issues, and `x64`/`arm64` mismatches first.
 - **Structured Results**: Prefer the structured envelope fields over ad-hoc string parsing. Read `success`, `message`, `data`, `error`, `error_code`, `warnings`, `job_id`, and `api_version` before deciding what to do next.
+- **Viewport Capture**: Use `capture_editor_viewport` for images. `take_editor_screenshot` is a compatibility wrapper and returns the same structured envelope instead of raw image bytes.
 - **Long-Running Work**: If a tool returns `pending=True` with a `job_id`, do not assume the command finished. Poll `get_job_status`, use `list_active_jobs` for visibility, and only call `cancel_job` when cancellation is still safe.
 - **Unsafe Escape Hatch**: Treat `execute_python_script` as an unsafe fallback, especially when `get_capabilities` marks `execute_python` as unsafe. Prefer dedicated Blueprint, component, plugin, and project tools when they exist.
 - **Pin Connections**: For inbuilt Events like BeginPlay Use "then" for execution pin, not "OutputDelegate" (delegates). Verify pin names in JSON.

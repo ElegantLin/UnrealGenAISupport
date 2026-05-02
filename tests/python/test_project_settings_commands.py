@@ -41,6 +41,26 @@ def _make_unreal(class_map=None):
     return mod
 
 
+def test_resolve_settings_prefers_unreal_get_default_object(monkeypatch):
+    cdo = FakeCDO()
+
+    class ClassReturningItself:
+        def get_default_object(self):
+            return self
+
+    cls = ClassReturningItself()
+    mod = _make_unreal({"/Script/Engine.RendererSettings": cls})
+    mod.get_default_object = lambda loaded_cls: cdo if loaded_cls is cls else None
+    monkeypatch.setattr(project_settings_commands, "_get_unreal_module", lambda: mod)
+
+    resp = project_settings_commands.handle_set_project_setting(
+        {"settings_class": "/Script/Engine.RendererSettings", "key": "bDefaultFeatureBloom", "value": False}
+    )
+
+    assert resp["success"] is True
+    assert cdo.props["bDefaultFeatureBloom"] is False
+
+
 def test_set_project_setting_requires_value():
     resp = project_settings_commands.handle_set_project_setting(
         {"settings_class": "/Script/Engine.RendererSettings", "key": "bFoo"}

@@ -75,6 +75,23 @@ def test_get_graph_nodes_returns_nodes(monkeypatch):
     assert resp["data"]["nodes"][0]["node_id"] == "n1"
 
 
+def test_get_graph_nodes_normalizes_full_uobject_graph_path(monkeypatch):
+    calls = []
+
+    def get_graph_nodes(*args):
+        calls.append(args)
+        return json.dumps({"nodes": [{"node_id": "n1"}]})
+
+    _install_utils(monkeypatch, {"get_graph_nodes": get_graph_nodes})
+    resp = ab.handle_get_graph_nodes({
+        "anim_blueprint_path": "/Game/ABP",
+        "graph_path": "/Game/ABP.ABP:AnimGraph",
+    })
+
+    assert resp["success"] is True
+    assert calls == [("/Game/ABP", "AnimGraph")]
+
+
 def test_create_state_machine_ok_with_report(monkeypatch):
     _install_utils(monkeypatch, {"create_state_machine": json.dumps({"success": True, "compiled": True, "saved": True})})
     resp = ab.handle_create_state_machine({
@@ -121,6 +138,7 @@ def test_create_transition_success(monkeypatch):
 
 def test_set_state_sequence_asset_failure_preserves_report(monkeypatch):
     _install_utils(monkeypatch, {"set_state_sequence_asset": json.dumps({"success": False, "error": "not found", "error_code": "ASSET_NOT_FOUND"})})
+    monkeypatch.setattr(ab, "_maybe_persist_failure_bundle", lambda *_args, **_kwargs: "/Saved/MCP/diagnostics/failure.json")
     resp = ab.handle_set_state_sequence_asset({
         "anim_blueprint_path": "/Game/ABP",
         "state_machine": "Locomotion",
@@ -131,6 +149,7 @@ def test_set_state_sequence_asset_failure_preserves_report(monkeypatch):
     assert resp["error_code"] == "ASSET_NOT_FOUND"
     assert "mutation_report" in resp
     assert "/Game/ABP" in resp["mutation_report"]["changed_assets"]
+    assert resp["mutation_report"]["diagnostic_bundle"] == "/Saved/MCP/diagnostics/failure.json"
 
 
 def test_set_apply_additive_alpha_bounds(monkeypatch):

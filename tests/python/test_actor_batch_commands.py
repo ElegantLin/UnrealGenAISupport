@@ -47,11 +47,17 @@ class FakeActorSubsystem:
         self.actors = list(actors or [])
         self._duplicates = duplicates or []
         self.selected = None
+        self.duplicate_call = None
 
     def get_all_level_actors(self):
         return self.actors
 
-    def duplicate_actors(self, actors, offset):
+    def duplicate_actors(self, actors, to_world=None, offset=None):
+        self.duplicate_call = {
+            "actors": actors,
+            "to_world": to_world,
+            "offset": offset,
+        }
         return self._duplicates
 
     def set_selected_level_actors(self, actors):
@@ -110,6 +116,8 @@ def test_duplicate_actors_success(monkeypatch):
     assert resp["success"] is True
     assert resp["data"]["source_count"] == 1
     assert resp["data"]["duplicates"][0]["label"] == "A_Copy"
+    assert mod._subsystem.duplicate_call["to_world"] is None
+    assert mod._subsystem.duplicate_call["offset"] == (100.0, 0.0, 0.0)
 
 
 # replace_static_mesh --------------------------------------------------------

@@ -6,23 +6,27 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
+#include "ImageUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Selection.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Subsystems/AssetEditorSubsystem.h"
-#include "Toolkits/AssetEditorManager.h"
-#include "Toolkits/IToolkit.h"
-#include "Toolkits/IToolkitHost.h"
+#include "UnrealClient.h"
 
 namespace
 {
+	TWeakObjectPtr<UBlueprint> LastMcpFocusedBlueprint;
+	TWeakObjectPtr<UEdGraph> LastMcpFocusedGraph;
+
 	FString SerializeJson(const TSharedRef<FJsonObject>& Object)
 	{
 		FString Out;
@@ -38,6 +42,129 @@ namespace
 		if (FJsonSerializer::Deserialize(Reader, Parsed) && Parsed.IsValid())
 		{
 			return Parsed;
+		}
+		return nullptr;
+	}
+
+	FString NormalizeGraphPath(const FString& Path)
+	{
+		FString Clean = Path;
+		Clean.TrimStartAndEndInline();
+		int32 ColonIndex = INDEX_NONE;
+		if (Clean.FindLastChar(TEXT(':'), ColonIndex))
+		{
+			const FString Prefix = Clean.Left(ColonIndex);
+			if (Prefix.StartsWith(TEXT("/")) || Prefix.Contains(TEXT("/")) || Prefix.Contains(TEXT(".")))
+			{
+				Clean = Clean.Mid(ColonIndex + 1);
+			}
+		}
+		Clean.ReplaceInline(TEXT("\\"), TEXT("/"));
+		Clean.ReplaceInline(TEXT("::"), TEXT("/"));
+		Clean.ReplaceInline(TEXT("."), TEXT("/"));
+		TArray<FString> Parts;
+		Clean.ParseIntoArray(Parts, TEXT("/"), true);
+
+		TArray<FString> Trimmed;
+		for (FString Part : Parts)
+		{
+			Part.TrimStartAndEndInline();
+			if (!Part.IsEmpty())
+			{
+				Trimmed.Add(Part);
+			}
+		}
+		return FString::Join(Trimmed, TEXT("/")).ToLower();
+	}
+
+	void CollectGraphRecursive(UEdGraph* Graph, TArray<UEdGraph*>& OutGraphs)
+	{
+		if (!Graph || OutGraphs.Contains(Graph))
+		{
+			return;
+		}
+		OutGraphs.Add(Graph);
+		for (TObjectPtr<UEdGraph> SubGraph : Graph->SubGraphs)
+		{
+			CollectGraphRecursive(SubGraph.Get(), OutGraphs);
+		}
+	}
+
+	TArray<UEdGraph*> CollectBlueprintGraphs(UBlueprint* Blueprint)
+	{
+		TArray<UEdGraph*> Graphs;
+		if (!Blueprint)
+		{
+			return Graphs;
+		}
+		for (TObjectPtr<UEdGraph> Graph : Blueprint->UbergraphPages) CollectGraphRecursive(Graph.Get(), Graphs);
+		for (TObjectPtr<UEdGraph> Graph : Blueprint->FunctionGraphs) CollectGraphRecursive(Graph.Get(), Graphs);
+		for (TObjectPtr<UEdGraph> Graph : Blueprint->MacroGraphs) CollectGraphRecursive(Graph.Get(), Graphs);
+		for (TObjectPtr<UEdGraph> Graph : Blueprint->DelegateSignatureGraphs) CollectGraphRecursive(Graph.Get(), Graphs);
+		return Graphs;
+	}
+
+	FString BuildGraphPath(UEdGraph* Graph)
+	{
+		TArray<FString> Parts;
+		UObject* Cursor = Graph;
+		while (Cursor)
+		{
+			if (UEdGraph* CursorGraph = Cast<UEdGraph>(Cursor))
+			{
+				Parts.Insert(CursorGraph->GetName(), 0);
+			}
+			UObject* Outer = Cursor->GetOuter();
+			if (Cast<UBlueprint>(Outer))
+			{
+				break;
+			}
+			Cursor = Outer;
+		}
+		return FString::Join(Parts, TEXT("/"));
+	}
+
+	UEdGraph* FindGraphByPath(UBlueprint* Blueprint, const FString& GraphPath)
+	{
+		const FString Target = NormalizeGraphPath(GraphPath);
+		if (Target.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		for (UEdGraph* Graph : CollectBlueprintGraphs(Blueprint))
+		{
+			if (!Graph)
+			{
+				continue;
+			}
+			const FString Name = NormalizeGraphPath(Graph->GetName());
+			const FString FullPath = NormalizeGraphPath(BuildGraphPath(Graph));
+			if (Target == Name || Target == FullPath || FullPath.EndsWith(FString(TEXT("/")) + Target))
+			{
+				return Graph;
+			}
+		}
+		return nullptr;
+	}
+
+	UEdGraphNode* FindNodeByGuid(UEdGraph* Graph, const FString& NodeGuid)
+	{
+		if (!Graph)
+		{
+			return nullptr;
+		}
+		FGuid TargetGuid;
+		if (!FGuid::Parse(NodeGuid, TargetGuid))
+		{
+			return nullptr;
+		}
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node && Node->NodeGuid == TargetGuid)
+			{
+				return Node;
+			}
 		}
 		return nullptr;
 	}
@@ -75,13 +202,41 @@ FString UGenEditorSessionUtils::CaptureSessionJson()
 			if (Edited.Num() > 0)
 			{
 				PrimaryPath = Edited[0]->GetPathName();
+				if (UBlueprint* PrimaryBlueprint = Cast<UBlueprint>(Edited[0]))
+				{
+					if (LastMcpFocusedBlueprint.Get() == PrimaryBlueprint && LastMcpFocusedGraph.IsValid())
+					{
+						Root->SetStringField(TEXT("active_graph_path"), BuildGraphPath(LastMcpFocusedGraph.Get()));
+					}
+					else
+					{
+						for (const FEditedDocumentInfo& Document : PrimaryBlueprint->LastEditedDocuments)
+						{
+							if (UEdGraph* Graph = Cast<UEdGraph>(Document.EditedObjectPath.ResolveObject()))
+							{
+								Root->SetStringField(TEXT("active_graph_path"), BuildGraphPath(Graph));
+								break;
+							}
+						}
+					}
+					if (!Root->HasField(TEXT("active_graph_path")))
+					{
+						if (UEdGraph* Graph = PrimaryBlueprint->GetLastEditedUberGraph())
+						{
+							Root->SetStringField(TEXT("active_graph_path"), BuildGraphPath(Graph));
+						}
+					}
+				}
 			}
 		}
 	}
 
 	Root->SetArrayField(TEXT("open_asset_paths"), OpenAssets);
 	Root->SetStringField(TEXT("primary_asset_path"), PrimaryPath);
-	Root->SetStringField(TEXT("active_graph_path"), TEXT(""));
+	if (!Root->HasField(TEXT("active_graph_path")))
+	{
+		Root->SetStringField(TEXT("active_graph_path"), TEXT(""));
+	}
 	Root->SetArrayField(TEXT("selected_nodes"), {});
 
 	// Selected level actors.
@@ -200,22 +355,164 @@ FString UGenEditorSessionUtils::BringAssetToFront(const FString& AssetPath)
 FString UGenEditorSessionUtils::FocusGraph(const FString& AssetPath, const FString& GraphPath)
 {
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-	// Minimal implementation: bring the owning asset to front.  Deeper focus
-	// (switching tabs) is handled by the Blueprint editor toolkit and can be
-	// layered on once we have a toolkit-level API we're happy with.
-	BringAssetToFront(AssetPath);
+	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+	UBlueprint* Blueprint = Cast<UBlueprint>(Asset);
+	if (!Blueprint)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Blueprint asset not found"));
+		Result->SetStringField(TEXT("graph_path"), GraphPath);
+		return SerializeJson(Result);
+	}
+
+	UEdGraph* Graph = FindGraphByPath(Blueprint, GraphPath);
+	if (!Graph)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Result->SetStringField(TEXT("graph_path"), GraphPath);
+		return SerializeJson(Result);
+	}
+
+	FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(Graph);
+	LastMcpFocusedBlueprint = Blueprint;
+	LastMcpFocusedGraph = Graph;
 	Result->SetBoolField(TEXT("success"), true);
-	Result->SetStringField(TEXT("graph_path"), GraphPath);
+	Result->SetBoolField(TEXT("focused_graph"), true);
+	Result->SetStringField(TEXT("graph_path"), BuildGraphPath(Graph));
 	return SerializeJson(Result);
 }
 
 FString UGenEditorSessionUtils::FocusNode(const FString& AssetPath, const FString& GraphPath, const FString& NodeGuid)
 {
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-	BringAssetToFront(AssetPath);
+	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+	UBlueprint* Blueprint = Cast<UBlueprint>(Asset);
+	if (!Blueprint)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Blueprint asset not found"));
+		Result->SetStringField(TEXT("graph_path"), GraphPath);
+		Result->SetStringField(TEXT("node_guid"), NodeGuid);
+		return SerializeJson(Result);
+	}
+
+	UEdGraph* Graph = FindGraphByPath(Blueprint, GraphPath);
+	if (!Graph)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Result->SetStringField(TEXT("graph_path"), GraphPath);
+		Result->SetStringField(TEXT("node_guid"), NodeGuid);
+		return SerializeJson(Result);
+	}
+
+	UEdGraphNode* Node = FindNodeByGuid(Graph, NodeGuid);
+	if (!Node)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Node not found"));
+		Result->SetStringField(TEXT("graph_path"), BuildGraphPath(Graph));
+		Result->SetStringField(TEXT("node_guid"), NodeGuid);
+		return SerializeJson(Result);
+	}
+
+	FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(Node);
+	LastMcpFocusedBlueprint = Blueprint;
+	LastMcpFocusedGraph = Graph;
 	Result->SetBoolField(TEXT("success"), true);
-	Result->SetStringField(TEXT("graph_path"), GraphPath);
+	Result->SetBoolField(TEXT("focused_node"), true);
+	Result->SetStringField(TEXT("graph_path"), BuildGraphPath(Graph));
 	Result->SetStringField(TEXT("node_guid"), NodeGuid);
+	return SerializeJson(Result);
+}
+
+FString UGenEditorSessionUtils::CaptureActiveViewportPng(const FString& OutputPath, int32 Width, int32 Height)
+{
+	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	if (!GEditor)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("GEditor is null"));
+		return SerializeJson(Result);
+	}
+
+	FViewport* Viewport = GEditor->GetActiveViewport();
+	if (!Viewport)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("No active editor viewport"));
+		return SerializeJson(Result);
+	}
+
+	const FIntPoint ViewportSize = Viewport->GetSizeXY();
+	if (ViewportSize.X <= 0 || ViewportSize.Y <= 0)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Active editor viewport has no readable size"));
+		return SerializeJson(Result);
+	}
+
+	TArray<FColor> Bitmap;
+	FReadSurfaceDataFlags ReadFlags(RCM_UNorm);
+	ReadFlags.SetLinearToGamma(true);
+	if (!Viewport->ReadPixels(Bitmap, ReadFlags) || Bitmap.Num() != ViewportSize.X * ViewportSize.Y)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Failed to read active editor viewport pixels"));
+		return SerializeJson(Result);
+	}
+
+	for (FColor& Pixel : Bitmap)
+	{
+		Pixel.A = 255;
+	}
+
+	int32 OutputWidth = ViewportSize.X;
+	int32 OutputHeight = ViewportSize.Y;
+	TArray<FColor>* EncodePixels = &Bitmap;
+	TArray<FColor> ResizedBitmap;
+	if (Width > 0 && Height > 0 && (Width != ViewportSize.X || Height != ViewportSize.Y))
+	{
+		ResizedBitmap.SetNum(Width * Height);
+		FImageUtils::ImageResize(
+			ViewportSize.X,
+			ViewportSize.Y,
+			Bitmap,
+			Width,
+			Height,
+			ResizedBitmap,
+			/*bLinearSpace*/ false);
+		EncodePixels = &ResizedBitmap;
+		OutputWidth = Width;
+		OutputHeight = Height;
+	}
+
+	TArray64<uint8> CompressedPng;
+	FImageUtils::PNGCompressImageArray(
+		OutputWidth,
+		OutputHeight,
+		TArrayView64<const FColor>(EncodePixels->GetData(), EncodePixels->Num()),
+		CompressedPng);
+
+	if (CompressedPng.Num() == 0)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Failed to encode viewport PNG"));
+		return SerializeJson(Result);
+	}
+
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), /*Tree*/ true);
+	const bool bSaved = FFileHelper::SaveArrayToFile(CompressedPng, *OutputPath);
+	Result->SetBoolField(TEXT("success"), bSaved);
+	Result->SetStringField(TEXT("path"), OutputPath);
+	Result->SetNumberField(TEXT("width"), OutputWidth);
+	Result->SetNumberField(TEXT("height"), OutputHeight);
+	Result->SetStringField(TEXT("capture_method"), TEXT("active_viewport_read_pixels"));
+	if (!bSaved)
+	{
+		Result->SetStringField(TEXT("error"), TEXT("Failed to write viewport PNG"));
+	}
 	return SerializeJson(Result);
 }
 

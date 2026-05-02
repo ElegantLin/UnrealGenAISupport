@@ -76,19 +76,19 @@ def _resolve_settings_cdo(unreal_mod, class_path: str):
         return None, f"Could not resolve settings class {class_path!r}."
 
     cdo = None
-    getter = getattr(cls, "get_default_object", None)
-    if callable(getter):
+    get_cdo = getattr(unreal_mod, "get_default_object", None)
+    if callable(get_cdo):
         try:
-            cdo = getter()
-        except Exception as exc:  # pragma: no cover
-            return None, f"Failed to get settings CDO: {exc}"
+            cdo = get_cdo(cls)
+        except Exception:
+            cdo = None
     if cdo is None:
-        get_cdo = getattr(unreal_mod, "get_default_object", None)
-        if callable(get_cdo):
+        getter = getattr(cls, "get_default_object", None)
+        if callable(getter):
             try:
-                cdo = get_cdo(cls)
-            except Exception:
-                cdo = None
+                cdo = getter()
+            except Exception as exc:  # pragma: no cover
+                return None, f"Failed to get settings CDO: {exc}"
     if cdo is None:
         return None, "Settings class exposes no default object."
     return cdo, None

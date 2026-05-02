@@ -95,6 +95,22 @@ def _unavailable_response(detail: str = "") -> Dict[str, Any]:
     )
 
 
+def _cpp_failure_response(
+    payload: Dict[str, Any],
+    *,
+    default_code: str,
+    default_message: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    details = dict(data or {})
+    details["cpp_response"] = payload
+    return err(
+        payload.get("error") or default_message,
+        error_code=payload.get("error_code") or default_code,
+        data=details,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -169,6 +185,13 @@ def handle_get_graph_nodes(command: Dict[str, Any]) -> Dict[str, Any]:
         return _unavailable_response(payload.get("error", ""))
     if payload.get("_error"):
         return err(payload["error"], error_code="GRAPH_NODES_FAILED")
+    if payload.get("success") is False:
+        return _cpp_failure_response(
+            payload,
+            default_code="GRAPH_NODES_FAILED",
+            default_message=f"Graph nodes lookup failed: {graph_path}",
+            data={"blueprint_path": blueprint_path, "graph_path": graph_path},
+        )
 
     nodes = payload.get("nodes") if isinstance(payload, dict) else []
     return ok(
@@ -197,6 +220,17 @@ def handle_get_graph_pins(command: Dict[str, Any]) -> Dict[str, Any]:
         return _unavailable_response(payload.get("error", ""))
     if payload.get("_error"):
         return err(payload["error"], error_code="GRAPH_PINS_FAILED")
+    if payload.get("success") is False:
+        return _cpp_failure_response(
+            payload,
+            default_code="GRAPH_PINS_FAILED",
+            default_message=f"Graph pins lookup failed: {graph_path}/{node_guid}",
+            data={
+                "blueprint_path": blueprint_path,
+                "graph_path": graph_path,
+                "node_guid": node_guid,
+            },
+        )
 
     return ok(
         "Graph pins retrieved.",

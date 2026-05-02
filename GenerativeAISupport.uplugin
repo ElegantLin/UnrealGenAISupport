@@ -2,7 +2,7 @@
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
-	"FriendlyName": "GenerativeAISupport",
+	"FriendlyName": "GenerativeAISupport (Workspace)",
 	"Description": "Adds support for OpenAI GPT, Anthropic Claude, DeepSeek, XAI Grok and more LLM/GenAI APIs in Unreal Engine",
 	"Category": "Other",
 	"CreatedBy": "Prajwal Shetty",
@@ -25,6 +25,13 @@
 		},
 		{
 			"Name": "EditorScriptingUtilities",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "EnhancedInput",
 			"Enabled": true,
 			"TargetAllowList": [
 				"Editor"

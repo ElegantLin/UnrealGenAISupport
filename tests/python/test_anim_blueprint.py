@@ -24,6 +24,14 @@ def test_parse_graph_path_strips_and_splits():
     assert parse_graph_path("AnimGraph//Locomotion") == ["AnimGraph", "Locomotion"]
 
 
+def test_parse_graph_path_accepts_full_uobject_graph_path():
+    assert parse_graph_path("/Game/Characters/ABP_Manny.ABP_Manny:AnimGraph") == ["AnimGraph"]
+    assert parse_graph_path("/Game/Characters/ABP_Manny.ABP_Manny:AnimGraph/Locomotion") == [
+        "AnimGraph",
+        "Locomotion",
+    ]
+
+
 def test_parse_graph_path_rejects_empty():
     with pytest.raises(AnimBlueprintError):
         parse_graph_path("")

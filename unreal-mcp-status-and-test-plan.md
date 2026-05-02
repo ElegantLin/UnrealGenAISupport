@@ -1,10 +1,10 @@
 # Unreal MCP Status & Real-Machine Test Plan
 
 - Version: `v1.0`
-- Date: `2026-04-21`
+- Date: `2026-05-01`
 - Scope: Consolidated status of `GenerativeAISupport` Unreal MCP plugin, merging the reliability improvement roadmap and the level-instance crash post-mortem into a single source of truth.
-- Supersedes (still kept for historical context): `unreal-mcp-improvement-plan.md`, `unreal-mcp-level-instance-postmortem.md`.
-- Engine target: UE 5.4.4 (crash evidence collected on this build; all code currently verified via pytest only).
+- Merged source of truth. Supersedes and replaces the historical `unreal-mcp-improvement-plan.md` and `unreal-mcp-level-instance-postmortem.md` files.
+- Engine target: UE 5.4.4 (crash evidence collected on this build; core workflows and postmortem smoke paths now partially verified against a live editor on Mac arm64).
 
 ---
 
@@ -21,8 +21,8 @@
 | BlendSpace read/write (P3) | ✅ Done | `test_blend_space.py`, `test_animation_commands.py` |
 | AnimBlueprint read (P4) + write (P5) | ✅ Done | `test_anim_blueprint.py`, `test_anim_blueprint_commands.py` |
 | Cross-cutting observability (P6) | 🟡 Partial (see §3) | `test_observability.py` |
-| Testing & validation (P7) | 🟡 Partial (see §3) | 226 unit tests pass; no real-editor regression yet |
-| **Level instance / landscape / viewport / settings / batch actor gaps (post-mortem)** | ✅ Done in code | `test_level_safety.py`, `test_level_commands.py`, `test_landscape_commands.py`, `test_viewport_commands.py`, `test_project_settings_commands.py`, `test_actor_batch_commands.py` |
+| Testing & validation (P7) | 🟡 Partial (see §3) | 254 unit tests pass; manual UE 5.4.4 / Mac arm64 smoke completed for core workflows |
+| **Level instance / landscape / viewport / settings / batch actor gaps (post-mortem)** | 🟡 Mostly validated (see §1.1) | `test_level_safety.py`, `test_level_commands.py`, `test_landscape_commands.py`, `test_viewport_commands.py`, `test_project_settings_commands.py`, `test_actor_batch_commands.py`; live editor smoke completed where UE Python exposes the needed API |
 
 Run the suite with:
 
@@ -30,9 +30,46 @@ Run the suite with:
 python3.11 -m pytest tests/python/ -q
 ```
 
-Current baseline: **226 passed** on 2026-04-21.
+Current baseline: **254 passed** on 2026-05-01.
 
-**Nothing in this doc has been verified against a running UE 5.4.4 editor yet.** The real-machine test plan in §4 must be executed before declaring the plugin production-ready.
+Core Blueprint, animation, viewport, input, settings, and postmortem smoke paths have been verified against a running UE 5.4.4 editor. The real-machine test plan in §4 remains the broader production-readiness checklist.
+
+### 1.1 Real-editor validation summary (UE 5.4.4 / Mac arm64)
+
+Validated against `/Users/zonglindi/Documents/ExamplesForUEGenAIPlugin` with the project plugin loaded from `/Users/zonglindi/Documents/ExamplesForUEGenAIPlugin/Plugins/GenerativeAISupport`.
+
+Passed live editor checks:
+
+- Socket handshake, `get_capabilities`, `get_editor_context`, and clean dirty-package reporting.
+- Ordinary Blueprint graph schema, full UObject graph path resolution, nodes, pins, and compile diagnostics.
+- `open_asset`, `focus_graph`, `capture_editor_session`, and active viewport PNG capture.
+- Enhanced Input create/map/list flow.
+- BlendSpace read/write after fixing the UE 5.4 `CopySingleValue` crash in axis updates.
+- AnimBlueprint structure read plus state machine, state, transition, alias, sequence binding, BlendSpace binding, graph nodes, and graph pins.
+- Postmortem paths: `create_level_from_template`, `get_all_scene_objects`, `select_actors`, `duplicate_actors`, `replace_static_mesh`, `replace_material`, `group_actors`, `add_level_to_world(mode="sublevel")`, `spawn_level_instance`, `list_level_instances`, `capture_editor_viewport`, `set_rendering_defaults`, and `LevelStreamingLevelInstanceEditor` refusal.
+
+Live editor results that are intentionally not green:
+
+- `create_level_instance_from_selection` cannot hit a happy path on this UE Python build because `unreal.LevelInstanceSubsystem` / `create_level_instance_from` is not exposed. The handler returns structured `LEVEL_OPERATION_FAILED`.
+- `create_landscape` cannot create a usable landscape through this Python surface; UE spawns `LandscapePlaceholder`. MCP now returns `LANDSCAPE_UNAVAILABLE` and removes the placeholder instead of reporting false success.
+
+Real-editor fixes added during validation:
+
+- `actor_batch_commands.handle_duplicate_actors` now calls the UE 5.4 signature as `duplicate_actors(actors, None, offset)`.
+- `landscape_commands.handle_create_landscape` detects `LandscapePlaceholder` and returns `LANDSCAPE_UNAVAILABLE`.
+- `project_settings_commands._resolve_settings_cdo` prefers `unreal.get_default_object(cls)` for settings CDOs.
+- `utils.anim_blueprint.parse_graph_path` accepts full UObject graph paths such as `/Game/ABP.ABP:AnimGraph`.
+
+Verification evidence from the latest pass:
+
+```bash
+python3 -m pytest tests/python/ -q
+python3 -m compileall -q Content/Python tests/python
+git diff --check
+RunUAT BuildPlugin -Plugin=/Users/zonglindi/Documents/UnrealGenAISupport/GenerativeAISupport.uplugin -Package=/private/tmp/UnrealGenAISupport_Build -TargetPlatforms=Mac -Rocket
+```
+
+Observed results: `254 passed`, compileall passed, diff check passed, BuildPlugin succeeded, and final editor context reported `dirty_package_count == 0`.
 
 ---
 
@@ -43,8 +80,8 @@ Current baseline: **226 passed** on 2026-04-21.
 | # | Gap | Status | Implementation |
 |---|---|---|---|
 | 1 | Create level from template | ✅ | `handlers/level_commands.py::handle_create_level_from_template` (shortcuts via `utils/level_safety.KNOWN_LEVEL_TEMPLATES`) |
-| 2 | Landscape creation + material | ✅ | `handlers/landscape_commands.py::handle_create_landscape`, `handle_set_landscape_material`; `LANDSCAPE_UNAVAILABLE` when engine lacks `unreal.Landscape` |
-| 3 | Create Level Instance from selection | ✅ | `handlers/level_commands.py::handle_create_level_instance_from_selection` + `handle_spawn_level_instance` + `handle_list_level_instances` |
+| 2 | Landscape creation + material | 🟡 | `handlers/landscape_commands.py::handle_create_landscape`, `handle_set_landscape_material`; real UE 5.4 editor returns `LandscapePlaceholder`, so MCP now returns `LANDSCAPE_UNAVAILABLE` rather than false success |
+| 3 | Create Level Instance from selection | 🟡 | `handlers/level_commands.py::handle_create_level_instance_from_selection` + `handle_spawn_level_instance` + `handle_list_level_instances`; `spawn_level_instance` passed live, but selection-based creation is blocked where `unreal.LevelInstanceSubsystem` is not exposed |
 | 4 | Safe `add_level_to_world` with guardrails | ✅ | `handlers/level_commands.py::handle_add_level_to_world` refuses `LevelStreamingLevelInstanceEditor` via `utils/level_safety.is_forbidden_streaming_class` → `LEVEL_INSTANCE_UNSAFE`; `mode` restricted to `{sublevel, level_instance, packed_level}` |
 | 5 | `get_all_scene_objects` broken on UE 5.4 | ✅ | `handlers/basic_commands.py::handle_get_all_scene_objects` now uses `EditorActorSubsystem.get_all_level_actors` with `GameplayStatics` fallback. Response now includes `label` and `count`. |
 | 6 | Safe viewport capture (no full-desktop screenshot) | ✅ | `handlers/viewport_commands.py::handle_capture_editor_viewport` uses `AutomationLibrary.take_high_res_screenshot` with `HighResShot` fallback; returns base64 PNG; writes into `Paths.screen_shot_dir()` / `<Saved>/Screenshots` |

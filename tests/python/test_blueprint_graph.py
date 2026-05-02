@@ -23,6 +23,14 @@ def test_normalize_graph_path_handles_separator_variants():
     assert normalize_graph_path("") == ""
 
 
+def test_normalize_graph_path_accepts_unreal_object_paths():
+    assert (
+        normalize_graph_path("/Game/ThirdPerson/Blueprints/BP_ThirdPersonCharacter.BP_ThirdPersonCharacter:EventGraph")
+        == "EventGraph"
+    )
+    assert normalize_graph_path("/Game/BP.BP:StateMachine.InnerGraph") == "StateMachine/InnerGraph"
+
+
 def test_split_graph_path_returns_segments():
     assert split_graph_path("a/b/c") == ["a", "b", "c"]
     assert split_graph_path("") == []

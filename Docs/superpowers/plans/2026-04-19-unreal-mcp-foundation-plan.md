@@ -12,7 +12,7 @@
 
 ## Scope Decision
 
-The umbrella roadmap in [unreal-mcp-improvement-plan.md](/Users/zonglindi/Documents/UnrealGenAISupport/unreal-mcp-improvement-plan.md:1) spans multiple independent subsystems. This plan intentionally covers only the first executable slice:
+The umbrella roadmap in [unreal-mcp-status-and-test-plan.md](/Users/zonglindi/Documents/UnrealGenAISupport/unreal-mcp-status-and-test-plan.md:1) spans multiple independent subsystems. This plan intentionally covers only the first executable slice:
 
 - `P0A` Protocol Contract
 - `P0B` Execution Model And Preflight

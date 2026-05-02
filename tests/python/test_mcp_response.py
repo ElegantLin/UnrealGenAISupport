@@ -420,3 +420,94 @@ def test_converted_tool_docstrings_describe_structured_envelope(monkeypatch, tmp
     ):
         docstring = getattr(mcp_server, tool_name).__doc__ or ""
         assert "Structured response envelope dict" in docstring
+
+
+def test_how_to_use_returns_structured_payload(monkeypatch, tmp_path):
+    mcp_server = _load_mcp_server(monkeypatch, tmp_path)
+
+    payload = mcp_server.how_to_use()
+
+    assert payload["success"] is True
+    assert payload["data"]["tool"] == "how_to_use"
+    assert "Fresh Session Rule" in payload["data"]["content"]
+
+
+def test_handshake_test_wraps_success_payload(monkeypatch, tmp_path):
+    mcp_server = _load_mcp_server(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        mcp_server,
+        "send_to_unreal",
+        lambda _command: {
+            "success": True,
+            "message": "Received: hello",
+            "connection_info": {"session_id": "UE-123"},
+        },
+    )
+
+    payload = mcp_server.handshake_test("hello")
+
+    assert payload["success"] is True
+    assert payload["message"] == "Handshake successful."
+    assert payload["data"]["tool"] == "handshake_test"
+    assert payload["data"]["response"]["connection_info"]["session_id"] == "UE-123"
+
+
+def test_create_blueprint_wraps_success_payload(monkeypatch, tmp_path):
+    mcp_server = _load_mcp_server(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        mcp_server,
+        "send_to_unreal",
+        lambda _command: {
+            "success": True,
+            "blueprint_path": "/Game/Blueprints/BP_Test",
+        },
+    )
+
+    payload = mcp_server.create_blueprint("BP_Test")
+
+    assert payload["success"] is True
+    assert payload["message"] == "Blueprint created successfully."
+    assert payload["data"]["tool"] == "create_blueprint"
+    assert payload["data"]["blueprint_path"] == "/Game/Blueprints/BP_Test"
+
+
+def test_get_all_scene_objects_wraps_actor_list(monkeypatch, tmp_path):
+    mcp_server = _load_mcp_server(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        mcp_server,
+        "send_to_unreal",
+        lambda _command: {
+            "success": True,
+            "actors": [{"name": "Cube_1", "class": "StaticMeshActor"}],
+        },
+    )
+
+    payload = mcp_server.get_all_scene_objects()
+
+    assert payload["success"] is True
+    assert payload["message"] == "Scene objects loaded."
+    assert payload["data"]["tool"] == "get_all_scene_objects"
+    assert payload["data"]["actors"][0]["name"] == "Cube_1"
+
+
+def test_search_free_fab_assets_wraps_verified_results(monkeypatch, tmp_path):
+    mcp_server = _load_mcp_server(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        mcp_server,
+        "_resolve_fab_search",
+        lambda query, max_results, timeout_seconds: {
+            "success": True,
+            "status": "completed",
+            "query": query,
+            "results": [{"listing_id": "asset-1", "title": "Stylized Tree Pack"}],
+            "max_results": max_results,
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+
+    payload = mcp_server.search_free_fab_assets("tree")
+
+    assert payload["success"] is True
+    assert payload["message"] == "Fab search completed."
+    assert payload["data"]["tool"] == "search_free_fab_assets"
+    assert payload["data"]["results"][0]["listing_id"] == "asset-1"

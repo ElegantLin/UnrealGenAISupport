@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import sys
 from pathlib import Path
@@ -9,14 +10,22 @@ from handlers import viewport_commands  # noqa: E402
 
 
 class FakePaths:
-    def __init__(self, saved):
+    def __init__(self, saved, relative=False):
         self._saved = saved
+        self._relative = relative
 
     def project_saved_dir(self):
         return self._saved
 
     def screen_shot_dir(self):
+        if self._relative:
+            return "../../../../Project/Saved/Screenshots"
         return os.path.join(self._saved, "Screenshots")
+
+    def convert_relative_path_to_full(self, path):
+        if path.startswith("../"):
+            return self._saved
+        return path
 
 
 class FakeAutomation:
@@ -31,13 +40,24 @@ class FakeAutomation:
                 fh.write(self.write_target)
 
 
-def _make_unreal(tmp_path, automation=None, system=None, write_png=b"\x89PNGfake"):
+def _make_unreal(tmp_path, automation=None, system=None, write_png=b"\x89PNGfake", session_utils=None):
     import types
     mod = types.SimpleNamespace()
     mod.Paths = FakePaths(str(tmp_path))
     mod.AutomationLibrary = automation if automation is not None else FakeAutomation(write_target=write_png)
     mod.SystemLibrary = system
+    if session_utils is not None:
+        mod.GenEditorSessionUtils = session_utils
     return mod
+
+
+def test_screenshot_dir_normalizes_unreal_relative_paths(tmp_path):
+    import types
+
+    mod = types.SimpleNamespace()
+    mod.Paths = FakePaths(str(tmp_path / "Saved" / "Screenshots"), relative=True)
+
+    assert viewport_commands._screenshot_dir(mod) == os.path.abspath(str(tmp_path / "Saved" / "Screenshots"))
 
 
 def test_capture_unavailable_without_editor(monkeypatch):
@@ -60,6 +80,38 @@ def test_capture_writes_file_and_returns_base64(monkeypatch, tmp_path):
     assert resp["data"]["path"].endswith("shot.png")
     assert base64.b64decode(resp["data"]["image_base64"]) == png_bytes
     assert automation.calls and automation.calls[0][0] == 640
+
+
+def test_capture_prefers_cpp_viewport_capture(monkeypatch, tmp_path):
+    png_bytes = b"\x89PNG\r\n\x1a\nCPP"
+
+    class FakeSessionUtils:
+        @staticmethod
+        def capture_active_viewport_png(path, width, height):
+            with open(path, "wb") as fh:
+                fh.write(png_bytes)
+            return json.dumps(
+                {
+                    "success": True,
+                    "path": path,
+                    "width": width,
+                    "height": height,
+                    "capture_method": "active_viewport_read_pixels",
+                }
+            )
+
+    automation = FakeAutomation(write_target=None)
+    mod = _make_unreal(tmp_path, automation=automation, session_utils=FakeSessionUtils)
+    monkeypatch.setattr(viewport_commands, "_get_unreal_module", lambda: mod)
+
+    resp = viewport_commands.handle_capture_editor_viewport(
+        {"filename": "cpp", "width": 320, "height": 180, "timeout": 0.2}
+    )
+
+    assert resp["success"] is True, resp
+    assert base64.b64decode(resp["data"]["image_base64"]) == png_bytes
+    assert resp["data"]["capture_method"] == "active_viewport_read_pixels"
+    assert automation.calls == []
 
 
 def test_capture_fails_when_no_capture_api(monkeypatch, tmp_path):

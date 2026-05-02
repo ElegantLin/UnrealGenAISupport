@@ -40,6 +40,9 @@ public:
 	static FString FocusNode(const FString& AssetPath, const FString& GraphPath, const FString& NodeGuid);
 
 	UFUNCTION(BlueprintCallable, Category = "Generative AI|Session")
+	static FString CaptureActiveViewportPng(const FString& OutputPath, int32 Width = 0, int32 Height = 0);
+
+	UFUNCTION(BlueprintCallable, Category = "Generative AI|Session")
 	static FString SelectActor(const FString& ActorLabel);
 
 private:

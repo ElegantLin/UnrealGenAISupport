@@ -4,6 +4,26 @@ import importlib.util
 import os
 import sys
 from utils import logging as log
+
+
+def restore_editor_session():
+    """Best-effort restore of the last MCP editor session on Unreal startup."""
+    try:
+        from handlers import session_commands
+
+        result = session_commands.handle_restore_editor_session({"policy": "assets_only"})
+        if result.get("success"):
+            restored = result.get("data", {}).get("restored", [])
+            log.log_info(f"Restored MCP editor session assets: {len(restored)}")
+            return
+
+        error_code = result.get("error_code")
+        if error_code != "SESSION_MISSING":
+            log.log_warning(f"MCP editor session restore skipped: {result.get('error') or error_code}")
+    except Exception as e:
+        log.log_warning(f"MCP editor session restore failed: {e}")
+
+
 def initialize_socket_server():
     """
     Initialize the socket server if auto-start is enabled in UE settings
@@ -68,3 +88,4 @@ def initialize_socket_server():
 
 # Run initialization when this script is loaded
 initialize_socket_server()
+restore_editor_session()

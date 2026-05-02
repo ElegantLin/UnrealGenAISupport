@@ -213,3 +213,148 @@ def test_wait_for_completion_flag_overrides_default_job_response(monkeypatch):
     assert unreal_socket_server._should_return_immediate_job_response(
         {"type": "get_editor_context", "wait_for_completion": False}
     ) is True
+
+
+def test_get_capabilities_returns_required_fields(monkeypatch):
+    unreal_socket_server = _load_unreal_socket_server(monkeypatch)
+    dispatcher = unreal_socket_server.CommandDispatcher()
+
+    monkeypatch.setattr(
+        unreal_socket_server.plugin_commands,
+        "handle_get_editor_context",
+        lambda _command: {
+            "success": True,
+            "input_system": "EnhancedInput",
+            "project_file_path": "/Projects/Test/Test.uproject",
+        },
+    )
+    monkeypatch.setattr(unreal_socket_server.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(unreal_socket_server.platform, "machine", lambda: "arm64")
+
+    payload = dispatcher._handle_get_capabilities({})
+
+    assert payload["success"] is True
+    assert payload["engine_version"] == "5.4"
+    assert payload["api_version"] == unreal_socket_server.API_VERSION
+    assert payload["platform"] == "Darwin"
+    assert payload["machine_architecture"] == "arm64"
+    assert payload["input_system"] == "EnhancedInput"
+    assert set(payload["supported_asset_types"]) >= {
+        "Blueprint",
+        "Material",
+        "ProjectFolder",
+        "UserWidget",
+        "InputAction",
+        "InputMappingContext",
+        "BlendSpace",
+        "BlendSpace1D",
+    }
+    assert set(payload["supported_graph_types"]) >= {
+        "UbergraphPages",
+        "FunctionGraphs",
+        "MacroGraphs",
+        "AnimationGraphs",
+        "AnimationStateMachineGraphs",
+    }
+    assert set(payload["unsafe_commands"]) >= {
+        "execute_python",
+        "execute_unreal_command",
+        "request_editor_restart",
+        "raw_anim_blueprint_node_edit",
+    }
+    assert payload["editor_context"]["project_file_path"] == "/Projects/Test/Test.uproject"
+    assert payload["warnings"] == []
+
+
+def test_dispatch_routes_get_capabilities_through_public_entry_point(monkeypatch):
+    unreal_socket_server = _load_unreal_socket_server(monkeypatch)
+    dispatcher = unreal_socket_server.CommandDispatcher()
+
+    monkeypatch.setattr(
+        unreal_socket_server.plugin_commands,
+        "handle_get_editor_context",
+        lambda _command: {
+            "success": True,
+            "input_system": "EnhancedInput",
+            "project_file_path": "/Projects/Test/Test.uproject",
+        },
+    )
+    monkeypatch.setattr(unreal_socket_server.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(unreal_socket_server.platform, "machine", lambda: "arm64")
+
+    payload = dispatcher.dispatch({"type": "get_capabilities"})
+
+    assert payload["success"] is True
+    assert payload["engine_version"] == "5.4"
+    assert payload["api_version"] == unreal_socket_server.API_VERSION
+    assert payload["platform"] == "Darwin"
+    assert payload["machine_architecture"] == "arm64"
+    assert payload["input_system"] == "EnhancedInput"
+    assert payload["editor_context"]["project_file_path"] == "/Projects/Test/Test.uproject"
+    assert payload["warnings"] == []
+
+
+def test_get_capabilities_returns_warning_when_editor_context_is_partial(monkeypatch):
+    unreal_socket_server = _load_unreal_socket_server(monkeypatch)
+    dispatcher = unreal_socket_server.CommandDispatcher()
+
+    monkeypatch.setattr(
+        unreal_socket_server.plugin_commands,
+        "handle_get_editor_context",
+        lambda _command: {
+            "success": False,
+            "error": "Editor context unavailable",
+        },
+    )
+    monkeypatch.setattr(unreal_socket_server.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(unreal_socket_server.platform, "machine", lambda: "arm64")
+
+    payload = dispatcher._handle_get_capabilities({})
+
+    assert {
+        "success",
+        "engine_version",
+        "platform",
+        "machine_architecture",
+        "input_system",
+        "supported_asset_types",
+        "supported_graph_types",
+        "unsafe_commands",
+        "api_version",
+        "editor_context",
+        "warnings",
+    } <= payload.keys()
+    assert payload["success"] is True
+    assert payload["engine_version"] == "5.4"
+    assert payload["api_version"] == unreal_socket_server.API_VERSION
+    assert payload["platform"] == "Darwin"
+    assert payload["machine_architecture"] == "arm64"
+    assert payload["input_system"] == "unknown"
+    assert set(payload["supported_asset_types"]) >= {
+        "Blueprint",
+        "Material",
+        "ProjectFolder",
+        "UserWidget",
+        "InputAction",
+        "InputMappingContext",
+        "BlendSpace",
+        "BlendSpace1D",
+    }
+    assert set(payload["supported_graph_types"]) >= {
+        "UbergraphPages",
+        "FunctionGraphs",
+        "MacroGraphs",
+        "AnimationGraphs",
+        "AnimationStateMachineGraphs",
+    }
+    assert set(payload["unsafe_commands"]) >= {
+        "execute_python",
+        "execute_unreal_command",
+        "request_editor_restart",
+        "raw_anim_blueprint_node_edit",
+    }
+    assert payload["editor_context"] == {
+        "success": False,
+        "error": "Editor context unavailable",
+    }
+    assert payload["warnings"] == ["Editor context unavailable"]

@@ -237,6 +237,7 @@ For test builds you can call the `GenSecureKey::SetGenAIApiKeyRuntime` either in
 ##### MCP Foundation Contract
 
 - Structured MCP tools now return a stable envelope with `success`, `message`, `data`, `error`, `error_code`, `warnings`, `job_id`, and `api_version` when relevant.
+- Viewport image tools return the structured JSON envelope. Use `capture_editor_viewport`; `take_editor_screenshot` is only a compatibility wrapper around that safe viewport capture path.
 - Call `get_capabilities` or `preflight_project` first in a fresh session so the client can inspect engine support, unsafe commands, editor paths, plugin state, and architecture mismatches before mutating assets.
 - Long-running commands may return a pending job response instead of blocking indefinitely. When that happens, poll `get_job_status`, inspect `list_active_jobs`, and use `cancel_job` when the job is still queued.
 - `get_capabilities` reports `unsafe_commands`, `supported_asset_types`, and `supported_graph_types` so the client can separate safe editor automation from higher-risk escape hatches.

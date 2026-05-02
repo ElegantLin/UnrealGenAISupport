@@ -24,7 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional
 class MutationReport:
     """Structured mutation report returned alongside every write response.
 
-    Field definitions match the spec in ``unreal-mcp-improvement-plan.md``
+    Field definitions match the spec in ``unreal-mcp-status-and-test-plan.md``
     section P6.
     """
 
@@ -36,6 +36,7 @@ class MutationReport:
     verification_checks: List[Dict[str, Any]] = field(default_factory=list)
     diff_summary: Dict[str, Any] = field(default_factory=dict)
     log_delta: List[str] = field(default_factory=list)
+    diagnostic_bundle: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -47,6 +48,7 @@ class MutationReport:
             "verification_checks": list(self.verification_checks),
             "diff_summary": dict(self.diff_summary),
             "log_delta": list(self.log_delta),
+            "diagnostic_bundle": self.diagnostic_bundle,
         }
 
 
@@ -73,6 +75,7 @@ def merge_reports(primary: MutationReport, secondary: MutationReport) -> Mutatio
         verification_checks=list(primary.verification_checks) + list(secondary.verification_checks),
         diff_summary={**primary.diff_summary, **secondary.diff_summary},
         log_delta=list(primary.log_delta) + list(secondary.log_delta),
+        diagnostic_bundle=primary.diagnostic_bundle or secondary.diagnostic_bundle,
     )
 
 

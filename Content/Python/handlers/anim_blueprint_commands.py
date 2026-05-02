@@ -253,16 +253,28 @@ def _finalize_write(
     success_data: Dict[str, Any],
     *,
     verify_path: Optional[str] = None,
+    request_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    def _persist_failure_report() -> None:
+        bundle_path = _maybe_persist_failure_bundle(method, request_payload or success_data, report)
+        if bundle_path:
+            report.diagnostic_bundle = bundle_path
+
+    diff_summary = result.get("diff_summary")
+    if isinstance(diff_summary, dict):
+        report.diff_summary.update(diff_summary)
+
     if result.get("_unavailable"):
         return _unavailable(method, result.get("error", ""))
     if result.get("_error"):
+        _persist_failure_report()
         return attach_report(
             err(error_code=ANIM_BP_WRITE_FAILED, message=result.get("error", "")),
             report,
         )
     if not result.get("success", True):
         code = result.get("error_code") or ANIM_BP_WRITE_FAILED
+        _persist_failure_report()
         return attach_report(
             err(error_code=code, message=result.get("error") or result.get("message") or f"{method} failed",
                 data=result),
@@ -303,6 +315,7 @@ def handle_create_state_machine(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"selector": sel.to_dict(), "entry_state": entry_state},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -326,6 +339,7 @@ def handle_create_state(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"selector": sel.to_dict(), "kind": kind},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -355,6 +369,7 @@ def handle_create_transition(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"selector": sel.to_dict(), "rule": rule.to_dict()},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -379,6 +394,7 @@ def handle_set_transition_rule(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"selector": sel.to_dict(), "rule": rule.to_dict()},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -406,6 +422,7 @@ def handle_create_state_alias(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"selector": sel.to_dict(), "aliased_states": targets},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -436,6 +453,7 @@ def handle_set_alias_targets(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"selector": sel.to_dict(), "aliased_states": targets},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -460,6 +478,7 @@ def _write_state_asset(command: Dict[str, Any], cpp_method: str, kind: str) -> D
         report,
         success_data={"selector": sel.to_dict(), "binding": binding.to_dict()},
         verify_path=sel.anim_blueprint_path,
+        request_payload=command,
     )
 
 
@@ -488,6 +507,7 @@ def handle_set_cached_pose_node(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"anim_blueprint_path": path, "pose_name": pose_name, "source_node": source_node},
         verify_path=path,
+        request_payload=command,
     )
 
 
@@ -507,6 +527,7 @@ def handle_set_default_slot_chain(command: Dict[str, Any]) -> Dict[str, Any]:
         report,
         success_data={"anim_blueprint_path": path, "slot_name": slot_name, "source_node": source_node},
         verify_path=path,
+        request_payload=command,
     )
 
 
@@ -539,4 +560,5 @@ def handle_set_apply_additive_chain(command: Dict[str, Any]) -> Dict[str, Any]:
             "alpha": alpha_float,
         },
         verify_path=path,
+        request_payload=command,
     )

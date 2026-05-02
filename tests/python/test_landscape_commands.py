@@ -28,6 +28,26 @@ class FakeActor:
         self.props[key] = value
 
 
+class FakeClass:
+    def __init__(self, name):
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+
+class FakePlaceholderActor(FakeActor):
+    def __init__(self):
+        super().__init__("")
+        self.destroyed = False
+
+    def get_class(self):
+        return FakeClass("LandscapePlaceholder")
+
+    def destroy_actor(self):
+        self.destroyed = True
+
+
 class FakeActorSubsystem:
     def __init__(self, actors=None, spawned=None):
         self.actors = list(actors or [])
@@ -92,6 +112,24 @@ def test_create_landscape_spawns_actor(monkeypatch):
     )
     assert resp["success"] is True
     assert resp["data"]["actor_label"] == "TerrainA"
+
+
+def test_create_landscape_rejects_placeholder_actor(monkeypatch):
+    class LandscapeCls:
+        pass
+
+    spawned = FakePlaceholderActor()
+    mod = _make_unreal(landscape_cls=LandscapeCls, spawned=spawned)
+    mod.EditorActorSubsystem = object
+    mod.get_editor_subsystem = lambda cls: FakeActorSubsystem(spawned=spawned) if cls is mod.EditorActorSubsystem else None
+    monkeypatch.setattr(landscape_commands, "_get_unreal_module", lambda: mod)
+
+    resp = landscape_commands.handle_create_landscape({"actor_label": "TerrainA"})
+
+    assert resp["success"] is False
+    assert resp["error_code"] == "LANDSCAPE_UNAVAILABLE"
+    assert resp["data"]["spawned_class"] == "LandscapePlaceholder"
+    assert spawned.destroyed is True
 
 
 def test_create_landscape_warns_when_material_missing(monkeypatch):

@@ -79,6 +79,49 @@ def test_resolve_graph_by_path_normalizes_input():
     assert response["data"]["graph_path"] == "EventGraph/MyFunc"
 
 
+def test_resolve_graph_by_path_accepts_schema_object_path():
+    captured = {}
+
+    unreal_stub = types.ModuleType("unreal")
+
+    class FakeBPUtils:
+        @staticmethod
+        def resolve_graph_by_path(blueprint_path, graph_path):
+            captured["graph_path"] = graph_path
+            return json.dumps({"found": True, "graph_path": graph_path, "kind": "Ubergraph"})
+
+    unreal_stub.GenBlueprintUtils = FakeBPUtils
+    handlers = _import(unreal_stub)
+    response = handlers.handle_resolve_graph_by_path(
+        {
+            "blueprint_path": "/Game/BP.BP",
+            "graph_path": "/Game/BP.BP:EventGraph",
+        }
+    )
+
+    assert captured["graph_path"] == "EventGraph"
+    assert response["success"] is True
+
+
+def test_get_graph_nodes_surfaces_cpp_failure():
+    payload = json.dumps({"success": False, "error_code": "GRAPH_NOT_FOUND", "error": "missing"})
+    handlers = _import(_make_unreal_stub("get_graph_nodes_json", payload))
+    response = handlers.handle_get_graph_nodes({"blueprint_path": "/Game/BP", "graph_path": "Missing"})
+    assert response["success"] is False
+    assert response["error_code"] == "GRAPH_NOT_FOUND"
+    assert response["data"]["cpp_response"]["error"] == "missing"
+
+
+def test_get_graph_pins_surfaces_cpp_failure():
+    payload = json.dumps({"success": False, "error_code": "NODE_NOT_FOUND", "error": "missing node"})
+    handlers = _import(_make_unreal_stub("get_graph_pins_json", payload))
+    response = handlers.handle_get_graph_pins(
+        {"blueprint_path": "/Game/BP", "graph_path": "EventGraph", "node_guid": "abc"}
+    )
+    assert response["success"] is False
+    assert response["error_code"] == "NODE_NOT_FOUND"
+
+
 def test_get_pin_compatibility_returns_envelope_with_diagnostics():
     handlers = _import()
     response = handlers.handle_get_pin_compatibility(

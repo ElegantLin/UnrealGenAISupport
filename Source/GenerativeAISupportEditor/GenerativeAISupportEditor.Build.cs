@@ -11,6 +11,7 @@ public class GenerativeAISupportEditor : ModuleRules
 	public GenerativeAISupportEditor(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+		bUseUnity = false;
 
 		PublicDependencyModuleNames.AddRange(
 			new string[]

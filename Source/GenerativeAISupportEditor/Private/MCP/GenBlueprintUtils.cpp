@@ -1213,18 +1213,38 @@ UEdGraph* UGenBlueprintUtils::FindGraphByPath(UBlueprint* Blueprint, const FStri
 {
 if (!Blueprint || NormalizedGraphPath.IsEmpty()) return nullptr;
 
-// Strip any leading/trailing slashes and use '/' as separator.
+TArray<UEdGraph*> AllGraphs;
+Blueprint->GetAllGraphs(AllGraphs);
+
+FString RawPath = NormalizedGraphPath;
+RawPath.TrimStartAndEndInline();
+for (UEdGraph* Graph : AllGraphs)
+{
+if (Graph && Graph->GetPathName().Equals(RawPath, ESearchCase::IgnoreCase))
+{
+return Graph;
+}
+}
+
+// Strip asset prefixes from full UObject paths like /Game/BP.BP:EventGraph.
 FString Sanitized = NormalizedGraphPath;
 Sanitized.TrimStartAndEndInline();
+int32 ColonIndex = INDEX_NONE;
+if (Sanitized.FindLastChar(TEXT(':'), ColonIndex))
+{
+Sanitized = Sanitized.Mid(ColonIndex + 1);
+}
+Sanitized.ReplaceInline(TEXT("\\"), TEXT("/"));
+Sanitized.ReplaceInline(TEXT("::"), TEXT("/"));
+Sanitized.ReplaceInline(TEXT("."), TEXT("/"));
+
+// Strip any leading/trailing slashes and use '/' as separator.
 while (Sanitized.StartsWith(TEXT("/"))) Sanitized.RightChopInline(1);
 while (Sanitized.EndsWith(TEXT("/"))) Sanitized.LeftChopInline(1);
 
 TArray<FString> Segments;
 Sanitized.ParseIntoArray(Segments, TEXT("/"), true);
 if (Segments.Num() == 0) return nullptr;
-
-TArray<UEdGraph*> AllGraphs;
-Blueprint->GetAllGraphs(AllGraphs);
 
 for (UEdGraph* Graph : AllGraphs)
 {
@@ -1564,18 +1584,14 @@ Warnings.Add(MakeShared<FJsonValueObject>(Warn));
 
 FCompilerResultsLog Results;
 Results.SetSourcePath(BlueprintPath);
-FKismetEditorUtilities::FCompileBlueprintOptions Options;
-Options.bIsRegeneratingOnLoad = false;
-Options.bSaveIntermediateProducts = false;
-FKismetEditorUtilities::CompileBlueprint(Blueprint, Options, &Results);
+FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &Results);
 
 TArray<TSharedPtr<FJsonValue>> Errors;
 for (const TSharedRef<FTokenizedMessage>& Msg : Results.Messages)
 {
 TSharedRef<FJsonObject> Obj = MakeShared<FJsonObject>();
 Obj->SetStringField(TEXT("message"), Msg->ToText().ToString());
-if (Msg->GetSeverity() == EMessageSeverity::Error
-|| Msg->GetSeverity() == EMessageSeverity::CriticalError)
+if (Msg->GetSeverity() == EMessageSeverity::Error)
 {
 Errors.Add(MakeShared<FJsonValueObject>(Obj));
 }

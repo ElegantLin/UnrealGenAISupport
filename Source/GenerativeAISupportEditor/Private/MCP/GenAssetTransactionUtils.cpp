@@ -144,7 +144,7 @@ bool UGenAssetTransactionUtils::RollbackToSnapshot(const FString& SnapshotToken)
 	{
 		Existing->SetDirtyFlag(false);
 	}
-	LoadPackage(nullptr, *Record->SnapshotPackagePath, LOAD_ForceLazyLoad);
+	LoadPackage(nullptr, *Record->SnapshotPackagePath, LOAD_None);
 	return true;
 }
 
@@ -160,17 +160,20 @@ FString UGenAssetTransactionUtils::VerifyAsset(const FString& AssetPath)
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Checks;
+	bool bAllPassed = true;
 
 	if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
 	{
 		FKismetEditorUtilities::CompileBlueprint(Blueprint);
 		TSharedRef<FJsonObject> Check = MakeShared<FJsonObject>();
 		Check->SetStringField(TEXT("name"), TEXT("blueprint_compile"));
-		Check->SetBoolField(TEXT("passed"), Blueprint->Status != BS_Error);
+		const bool bCompilePassed = Blueprint->Status != BS_Error;
+		Check->SetBoolField(TEXT("passed"), bCompilePassed);
+		bAllPassed = bAllPassed && bCompilePassed;
 		Checks.Add(MakeShared<FJsonValueObject>(Check));
 	}
 
-	Result->SetBoolField(TEXT("passed"), true);
+	Result->SetBoolField(TEXT("passed"), bAllPassed);
 	Result->SetArrayField(TEXT("checks"), Checks);
 	return SerializeJson(Result);
 }

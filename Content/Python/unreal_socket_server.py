@@ -348,9 +348,9 @@ class CommandDispatcher:
 
             # AnimBlueprint read (P4)
             "get_anim_blueprint_structure": anim_blueprint_commands.handle_get_anim_blueprint_structure,
-            "get_graph_nodes": anim_blueprint_commands.handle_get_graph_nodes,
-            "get_graph_pins": anim_blueprint_commands.handle_get_graph_pins,
-            "resolve_graph_by_path": anim_blueprint_commands.handle_resolve_graph_by_path,
+            "get_anim_graph_nodes": anim_blueprint_commands.handle_get_graph_nodes,
+            "get_anim_graph_pins": anim_blueprint_commands.handle_get_graph_pins,
+            "resolve_anim_graph_by_path": anim_blueprint_commands.handle_resolve_graph_by_path,
 
             # AnimBlueprint write (P5)
             "create_state_machine": anim_blueprint_commands.handle_create_state_machine,
@@ -735,6 +735,7 @@ def initialize_server():
     log.log_info("  - Mutation: preview_operation, apply_operation, undo_last_mcp_operation")
     log.log_info("  - Blueprint: create_blueprint, add_component, add_variable, add_function, add_node, connect_nodes, compile_blueprint, spawn_blueprint, add_nodes_bulk, connect_nodes_bulk")
     log.log_info("  - Blueprint Inspection: get_graph_schema, resolve_graph_by_path, get_graph_nodes, get_graph_pins, resolve_node_by_selector, get_pin_compatibility, suggest_autocast_path, compile_blueprint_with_diagnostics")
+    log.log_info("  - AnimBlueprint Inspection: get_anim_blueprint_structure, resolve_anim_graph_by_path, get_anim_graph_nodes, get_anim_graph_pins")
     log.log_info("  - Basic: spawn, create_material, modify_object, take_screenshot")
 
 

@@ -12,6 +12,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -67,7 +68,7 @@ FString UGenAnimationAssetUtils::GetBlendSpaceInfo(const FString& BlendSpacePath
 	Root->SetStringField(TEXT("blend_space_path"), BlendSpace->GetPathName());
 	Root->SetStringField(TEXT("skeleton_path"),
 		BlendSpace->GetSkeleton() ? BlendSpace->GetSkeleton()->GetPathName() : TEXT(""));
-	Root->SetBoolField(TEXT("is_additive"), BlendSpace->bIsAdditive);
+	Root->SetBoolField(TEXT("is_additive"), BlendSpace->IsValidAdditive());
 
 	TArray<TSharedPtr<FJsonValue>> Axes;
 	for (int32 AxisIdx = 0; AxisIdx < 2; ++AxisIdx)
@@ -108,6 +109,13 @@ FString UGenAnimationAssetUtils::GetBlendSpaceInfo(const FString& BlendSpacePath
 FString UGenAnimationAssetUtils::SetBlendSpaceAxis(const FString& BlendSpacePath, int32 AxisIndex, const FString& AxisJson)
 {
 	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+	if (AxisIndex < 0 || AxisIndex >= 3)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Axis index must be 0, 1, or 2"));
+		return SerializeJson(Result);
+	}
+
 	UBlendSpace* BlendSpace = LoadBlendSpace(BlendSpacePath);
 	if (!BlendSpace)
 	{
@@ -133,10 +141,23 @@ FString UGenAnimationAssetUtils::SetBlendSpaceAxis(const FString& BlendSpacePath
 	Params.GridNum = FMath::Max(1, Grid);
 
 	BlendSpace->Modify();
-	// UBlendSpace exposes BlendParameters array via property editing; we go through PostEditChangeProperty.
-	// Fallback: use SetAxisToScaleAnimation etc. if not accessible.  For now, we update the cached copy and
-	// rely on PostEditChange to pick up grid changes.
-	BlendSpace->PostEditChange();
+	FStructProperty* BlendParametersProperty = FindFProperty<FStructProperty>(
+		BlendSpace->GetClass(),
+		TEXT("BlendParameters"));
+	if (!BlendParametersProperty || BlendParametersProperty->ArrayDim <= AxisIndex)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("BlendParameters property is unavailable"));
+		return SerializeJson(Result);
+	}
+
+	void* AxisValuePtr = BlendParametersProperty->ContainerPtrToValuePtr<void>(BlendSpace, AxisIndex);
+	BlendParametersProperty->CopySingleValue(AxisValuePtr, &Params);
+
+	FPropertyChangedEvent ChangedEvent(BlendParametersProperty, EPropertyChangeType::ValueSet);
+	BlendSpace->PostEditChangeProperty(ChangedEvent);
+	BlendSpace->ValidateSampleData();
+	BlendSpace->ResampleData();
 	const bool bSaved = SaveBlendSpacePackage(BlendSpace);
 
 	Result->SetBoolField(TEXT("success"), bSaved);

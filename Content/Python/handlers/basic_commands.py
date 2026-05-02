@@ -3,7 +3,6 @@ from typing import Dict, Any, List, Tuple
 
 import base64
 import os
-import mss
 import time
 import tempfile # Used to find the OS's temporary folder
 
