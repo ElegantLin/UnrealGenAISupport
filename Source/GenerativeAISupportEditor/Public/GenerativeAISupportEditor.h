@@ -27,6 +27,7 @@ private:
 	void EnsureInitialProjectSetup();
 	void EnsureDefaultSocketServerAutostart();
 	void EnsureCodexConfiguration();
+	void RunPluginInitScript();
 	void RegisterMenuExtension();
 	void UnregisterMenuExtension();
 	void OnEditorWindowMenuClicked();

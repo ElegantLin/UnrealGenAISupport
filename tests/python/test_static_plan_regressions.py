@@ -104,6 +104,17 @@ def test_init_unreal_attempts_best_effort_session_restore():
     assert "assets_only" in source
 
 
+def test_editor_module_runs_plugin_init_unreal_script_on_startup():
+    source = _read("Source/GenerativeAISupportEditor/Private/GenerativeAISupportEditor.cpp")
+    build = _read("Source/GenerativeAISupportEditor/GenerativeAISupportEditor.Build.cs")
+
+    assert '#include "IPythonScriptPlugin.h"' in source
+    assert "RunPluginInitScript" in source
+    assert "init_unreal.py" in source
+    assert "ExecPythonCommand" in source
+    assert '"PythonScriptPlugin"' in build
+
+
 def test_editor_session_focus_uses_kismet_graph_and_node_focus():
     source = _read("Source/GenerativeAISupportEditor/Private/MCP/GenEditorSessionUtils.cpp")
 

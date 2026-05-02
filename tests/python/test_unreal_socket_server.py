@@ -215,6 +215,31 @@ def test_wait_for_completion_flag_overrides_default_job_response(monkeypatch):
     ) is True
 
 
+def test_initialize_server_is_idempotent_after_module_import(monkeypatch):
+    unreal_socket_server = _load_unreal_socket_server(monkeypatch)
+    started_threads = []
+    registered_callbacks = []
+
+    class CountingThread:
+        def __init__(self, *args, **kwargs):
+            self.daemon = False
+
+        def start(self):
+            started_threads.append(True)
+
+    monkeypatch.setattr(unreal_socket_server.threading, "Thread", CountingThread)
+    monkeypatch.setattr(
+        unreal_socket_server.unreal,
+        "register_slate_post_tick_callback",
+        lambda callback: registered_callbacks.append(callback),
+    )
+
+    unreal_socket_server.initialize_server()
+
+    assert started_threads == []
+    assert registered_callbacks == []
+
+
 def test_get_capabilities_returns_required_fields(monkeypatch):
     unreal_socket_server = _load_unreal_socket_server(monkeypatch)
     dispatcher = unreal_socket_server.CommandDispatcher()

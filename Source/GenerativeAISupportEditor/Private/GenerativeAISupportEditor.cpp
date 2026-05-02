@@ -9,6 +9,7 @@
 #include "Styling/AppStyle.h"
 #include "GenerativeAISupportSettings.h"
 #include "ISettingsSection.h"
+#include "IPythonScriptPlugin.h"
 #include "LevelEditor.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
@@ -156,6 +157,9 @@ void FGenerativeAISupportEditorModule::StartupModule()
     // Bootstrap defaults for new projects and Codex MCP integration.
     EnsureInitialProjectSetup();
 
+    // Start the Unreal-side socket server from the installed plugin path.
+    RunPluginInitScript();
+
     // Register menu extension
     RegisterMenuExtension();
 
@@ -299,6 +303,56 @@ void FGenerativeAISupportEditorModule::EnsureCodexConfiguration()
     else
     {
         UE_LOG(LogTemp, Warning, TEXT("Failed to update global Codex MCP config at: %s"), *PreferredConfigPath);
+    }
+}
+
+void FGenerativeAISupportEditorModule::RunPluginInitScript()
+{
+    FString PluginBaseDir;
+    FString PluginPythonPath;
+    if (!ResolvePluginPaths(PluginBaseDir, PluginPythonPath))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("GenerativeAISupport plugin path could not be resolved for Python startup."));
+        return;
+    }
+
+    FString PluginPythonDir = FPaths::GetPath(PluginPythonPath);
+    FPaths::NormalizeFilename(PluginPythonDir);
+
+    FString InitScriptPath = FPaths::Combine(PluginPythonDir, TEXT("init_unreal.py"));
+    FPaths::NormalizeFilename(InitScriptPath);
+
+    if (!FPaths::FileExists(InitScriptPath))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("GenerativeAISupport init script was not found at: %s"), *InitScriptPath);
+        return;
+    }
+
+    IPythonScriptPlugin* PythonScriptPlugin = FModuleManager::LoadModulePtr<IPythonScriptPlugin>("PythonScriptPlugin");
+    if (!PythonScriptPlugin || !PythonScriptPlugin->IsPythonAvailable())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("PythonScriptPlugin is unavailable; GenerativeAISupport socket server was not started."));
+        return;
+    }
+
+    const FString PythonCommand = FString::Printf(
+        TEXT("import runpy, sys\n")
+        TEXT("plugin_python_dir = r'''%s'''\n")
+        TEXT("init_script_path = r'''%s'''\n")
+        TEXT("if plugin_python_dir not in sys.path:\n")
+        TEXT("    sys.path.insert(0, plugin_python_dir)\n")
+        TEXT("runpy.run_path(init_script_path, run_name='__genai_init_unreal__')\n"),
+        *PluginPythonDir,
+        *InitScriptPath
+    );
+
+    if (PythonScriptPlugin->ExecPythonCommand(*PythonCommand))
+    {
+        UE_LOG(LogTemp, Log, TEXT("Ran GenerativeAISupport init script: %s"), *InitScriptPath);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Failed to run GenerativeAISupport init script: %s"), *InitScriptPath);
     }
 }
 

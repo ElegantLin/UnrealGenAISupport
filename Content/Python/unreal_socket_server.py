@@ -52,6 +52,7 @@ state_lock = threading.Lock()
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 DIRECT_THREAD_COMMANDS = {"handshake", "get_job_status", "cancel_job", "list_active_jobs"}
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30.0
+SERVER_STATE_ATTR = "_genai_unreal_socket_server_state"
 COMMAND_WAIT_TIMEOUTS = {
     "add_nodes_bulk": 120.0,
     "compile_blueprint": 120.0,
@@ -71,6 +72,14 @@ LONG_RUNNING_COMMANDS = {
     "execute_unreal_command",
     "request_editor_restart",
 }
+
+
+def _get_server_state() -> Dict[str, bool]:
+    state = getattr(unreal, SERVER_STATE_ATTR, None)
+    if not isinstance(state, dict):
+        state = {}
+        setattr(unreal, SERVER_STATE_ATTR, state)
+    return state
 
 
 def _extract_warning_lines(recent_logs: List[str]) -> List[str]:
@@ -661,9 +670,19 @@ def receive_all_data(conn, buffer_size=4096):
 
 def socket_server_thread():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(("localhost", 9877))
-    server_socket.listen(1)
+    try:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("localhost", 9877))
+        server_socket.listen(1)
+    except Exception as exc:
+        _get_server_state()["started"] = False
+        log.log_error(f"Failed to start Unreal socket server on localhost:9877: {exc}", include_traceback=True)
+        try:
+            server_socket.close()
+        except Exception:
+            pass
+        return
+
     log.log_info("Unreal Engine socket server started on port 9877")
 
     while True:
@@ -716,11 +735,24 @@ def socket_server_thread():
 
 
 def register_command_processor():
+    state = _get_server_state()
+    if state.get("processor_registered"):
+        log.log_info("Command processor already registered")
+        return
+
     unreal.register_slate_post_tick_callback(process_commands)
+    state["processor_registered"] = True
     log.log_info("Command processor registered")
 
 
 def initialize_server():
+    state = _get_server_state()
+    if state.get("started"):
+        log.log_info("Unreal Engine AI command server is already initialized")
+        register_command_processor()
+        return
+
+    state["started"] = True
     thread = threading.Thread(target=socket_server_thread)
     thread.daemon = True
     thread.start()

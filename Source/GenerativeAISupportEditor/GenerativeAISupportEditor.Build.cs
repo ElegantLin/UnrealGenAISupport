@@ -58,7 +58,8 @@ public class GenerativeAISupportEditor : ModuleRules
 				"UMGEditor",
 				"UMG",
 				"Settings",
-				"FunctionalTesting",     // For AutomationBlueprintFunctionLibrary 
+				"PythonScriptPlugin",
+				"FunctionalTesting",     // For AutomationBlueprintFunctionLibrary
 				"SourceControl",   // For Source Control integration
 				"HTTP",
 				"WebBrowser"
